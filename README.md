@@ -49,6 +49,10 @@ Each market window also has a backup trigger 30 minutes later. The workflow uses
 ## Reliability
 
 - Telegram sends are retried up to 5 times with short backoff.
+- Data reads are retried before being marked unavailable.
+- Key Treasury yield points fall back to the US Treasury XML feed if FRED is unavailable.
+- SOFR and EFFR fall back to the New York Fed reference-rate API if FRED is unavailable.
+- Missing data is summarized in one warning line instead of filling the report with `n/a`.
 - Manual `Run workflow` always sends a market message immediately.
 - Scheduled runs outside the New York target windows exit quietly.
 - Backup triggers reduce the chance that a delayed or dropped scheduled run causes a missed alert, but GitHub Actions and mobile push notifications are still not a hard real-time delivery system.

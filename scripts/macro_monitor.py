@@ -7,12 +7,17 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 STOOQ_DAILY_URL = "https://stooq.com/q/d/l/"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
+TREASURY_XML_URL = "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml"
+NYFED_RATES_URL = "https://markets.newyorkfed.org/api/rates"
+HTTP_MAX_ATTEMPTS = 3
+HTTP_RETRY_BASE_SECONDS = 1
 TELEGRAM_MAX_ATTEMPTS = 5
 TELEGRAM_RETRY_BASE_SECONDS = 2
 
@@ -28,10 +33,10 @@ SERIES = {
     "DTWEXBGS": "Broad USD",
     "SOFR": "SOFR",
     "EFFR": "EFFR",
-    "WALCL": "Fed assets",
-    "RESBALNS": "Reserve balances",
+    "WALCL": "Fed总资产",
+    "RESBALNS": "准备金",
     "RRPONTSYD": "ON RRP",
-    "DPCREDIT": "Discount window",
+    "DPCREDIT": "贴现窗口",
 }
 
 MARKET_QUOTES = {
@@ -130,22 +135,63 @@ EVENTS = [
 ]
 
 
+TREASURY_FALLBACKS = {
+    "DGS2": ("daily_treasury_yield_curve", "BC_2YEAR"),
+    "DGS10": ("daily_treasury_yield_curve", "BC_10YEAR"),
+    "DGS30": ("daily_treasury_yield_curve", "BC_30YEAR"),
+    "DFII10": ("daily_treasury_real_yield_curve", "TC_10YEAR"),
+}
+NYFED_RATE_FALLBACKS = {
+    "SOFR": ("secured", "sofr"),
+    "EFFR": ("unsecured", "effr"),
+}
+FED_BALANCE_UNITS = {
+    "WALCL": "millions",
+    "RESBALNS": "billions",
+    "RRPONTSYD": "billions",
+    "DPCREDIT": "billions",
+}
+
 FETCH_ERRORS = {}
 MARKET_SOURCES = {}
+DATA_SOURCES = {}
+ERROR_PRIORITY = [
+    "DGS2",
+    "DGS10",
+    "DGS30",
+    "DFII10",
+    "T10YIE",
+    "SOFR",
+    "EFFR",
+    "WALCL",
+    "RESBALNS",
+    "RRPONTSYD",
+    "DPCREDIT",
+    "DTWEXBGS",
+    "BAMLH0A0HYM2",
+]
 
 
-def fetch_latest_pair(series_id):
+def read_url_text(request, timeout=25, attempts=HTTP_MAX_ATTEMPTS):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8")
+        except Exception as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(min(HTTP_RETRY_BASE_SECONDS * attempt, 5))
+    raise last_error
+
+
+def fetch_fred_pair(series_id):
     params = urllib.parse.urlencode({"id": series_id})
-    try:
-        request = urllib.request.Request(
-            f"{FRED_URL}?{params}",
-            headers={"User-Agent": "macro-telegram-monitor/1.0"},
-        )
-        with urllib.request.urlopen(request, timeout=25) as response:
-            text = response.read().decode("utf-8")
-    except Exception as exc:
-        FETCH_ERRORS[series_id] = str(exc)
-        return None, None
+    request = urllib.request.Request(
+        f"{FRED_URL}?{params}",
+        headers={"User-Agent": "macro-telegram-monitor/1.0"},
+    )
+    text = read_url_text(request)
 
     values = []
     for row in csv.DictReader(text.splitlines()):
@@ -158,11 +204,131 @@ def fetch_latest_pair(series_id):
             continue
 
     if not values:
-        FETCH_ERRORS[series_id] = "no usable values"
-        return None, None
+        raise RuntimeError("FRED returned no usable values")
     if len(values) == 1:
         return values[-1], None
     return values[-1], values[-2]
+
+
+def previous_month(year, month):
+    if month == 1:
+        return year - 1, 12
+    return year, month - 1
+
+
+def recent_treasury_months():
+    today = dt.datetime.now(ZoneInfo("America/New_York")).date()
+    year = today.year
+    month = today.month
+    months = []
+    for _ in range(3):
+        months.append(f"{year}{month:02d}")
+        year, month = previous_month(year, month)
+    return months
+
+
+def xml_local_name(tag):
+    return tag.rsplit("}", 1)[-1]
+
+
+def parse_treasury_values(text, field_name):
+    values = []
+    root = ET.fromstring(text)
+    for element in root.iter():
+        if xml_local_name(element.tag) != "properties":
+            continue
+        fields = {xml_local_name(child.tag): (child.text or "").strip() for child in list(element)}
+        date_text = fields.get("NEW_DATE", "")[:10]
+        raw_value = fields.get(field_name, "")
+        if not date_text or not raw_value:
+            continue
+        try:
+            values.append((date_text, float(raw_value)))
+        except ValueError:
+            continue
+    return values
+
+
+def fetch_treasury_pair(series_id):
+    dataset, field_name = TREASURY_FALLBACKS[series_id]
+    values = []
+    for month in recent_treasury_months():
+        params = urllib.parse.urlencode(
+            {
+                "data": dataset,
+                "field_tdr_date_value_month": month,
+            }
+        )
+        request = urllib.request.Request(
+            f"{TREASURY_XML_URL}?{params}",
+            headers={"User-Agent": "macro-telegram-monitor/1.0"},
+        )
+        text = read_url_text(request)
+        values.extend(parse_treasury_values(text, field_name))
+
+    deduped = {}
+    for date_text, value in values:
+        deduped[date_text] = value
+    values = sorted(deduped.items())
+    if not values:
+        raise RuntimeError("Treasury returned no usable values")
+    if len(values) == 1:
+        return values[-1], None
+    return values[-1], values[-2]
+
+
+def fetch_nyfed_rate_pair(series_id):
+    market, rate = NYFED_RATE_FALLBACKS[series_id]
+    request = urllib.request.Request(
+        f"{NYFED_RATES_URL}/{market}/{rate}/last/5.json",
+        headers={"User-Agent": "macro-telegram-monitor/1.0"},
+    )
+    payload = json.loads(read_url_text(request))
+    values = []
+    for row in payload.get("refRates") or []:
+        date_text = (row.get("effectiveDate") or "").strip()
+        raw_value = row.get("percentRate")
+        if not date_text or raw_value is None:
+            continue
+        try:
+            values.append((date_text, float(raw_value)))
+        except (TypeError, ValueError):
+            continue
+    values = sorted(values)
+    if not values:
+        raise RuntimeError("NY Fed returned no usable values")
+    if len(values) == 1:
+        return values[-1], None
+    return values[-1], values[-2]
+
+
+def fetch_latest_pair(series_id):
+    errors = []
+    try:
+        pair = fetch_fred_pair(series_id)
+        DATA_SOURCES[series_id] = "FRED"
+        return pair
+    except Exception as exc:
+        errors.append(f"FRED: {exc}")
+
+    if series_id in TREASURY_FALLBACKS:
+        try:
+            pair = fetch_treasury_pair(series_id)
+            DATA_SOURCES[series_id] = "Treasury"
+            return pair
+        except Exception as exc:
+            errors.append(f"Treasury: {exc}")
+
+    if series_id in NYFED_RATE_FALLBACKS:
+        try:
+            pair = fetch_nyfed_rate_pair(series_id)
+            DATA_SOURCES[series_id] = "NY Fed"
+            return pair
+        except Exception as exc:
+            errors.append(f"NY Fed: {exc}")
+
+    FETCH_ERRORS[series_id] = "; ".join(errors)
+    return None, None
 
 
 def label_for_key(key):
@@ -185,8 +351,7 @@ def fetch_stooq_pair(symbol):
         f"{STOOQ_DAILY_URL}?{params}",
         headers={"User-Agent": "macro-telegram-monitor/1.0"},
     )
-    with urllib.request.urlopen(request, timeout=25) as response:
-        text = response.read().decode("utf-8")
+    text = read_url_text(request)
 
     values = []
     for row in csv.DictReader(text.splitlines()):
@@ -213,8 +378,7 @@ def fetch_yahoo_pair(symbol):
         f"{YAHOO_CHART_URL}{encoded_symbol}?{params}",
         headers={"User-Agent": "macro-telegram-monitor/1.0"},
     )
-    with urllib.request.urlopen(request, timeout=25) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    payload = json.loads(read_url_text(request))
 
     result = (payload.get("chart") or {}).get("result") or []
     if not result:
@@ -234,6 +398,14 @@ def fetch_yahoo_pair(symbol):
     return values[-1], values[-2]
 
 
+def stooq_fallback_symbol(yahoo_symbol):
+    if not yahoo_symbol:
+        return None
+    if yahoo_symbol.endswith(".KS") or "=" in yahoo_symbol or "-" in yahoo_symbol:
+        return None
+    return f"{yahoo_symbol.lower()}.us"
+
+
 def fetch_market_pair(key):
     quote = MARKET_QUOTES[key]
     errors = []
@@ -244,9 +416,10 @@ def fetch_market_pair(key):
     except Exception as exc:
         errors.append(f"Yahoo: {exc}")
 
-    if quote.get("stooq"):
+    stooq_symbol = quote.get("stooq") or stooq_fallback_symbol(quote.get("yahoo"))
+    if stooq_symbol:
         try:
-            pair = fetch_stooq_pair(quote["stooq"])
+            pair = fetch_stooq_pair(stooq_symbol)
             MARKET_SOURCES[key] = "Stooq"
             return pair
         except Exception as exc:
@@ -272,14 +445,14 @@ def change_pct(pair):
 
 def fmt_bp(bp):
     if bp is None:
-        return "n/a"
+        return "未更新"
     sign = "+" if bp >= 0 else ""
     return f"{sign}{bp:.1f}bp"
 
 
 def fmt_pct(pct):
     if pct is None:
-        return "n/a"
+        return "未更新"
     sign = "+" if pct >= 0 else ""
     return f"{sign}{pct:.2f}%"
 
@@ -287,12 +460,130 @@ def fmt_pct(pct):
 def fmt_level(pair, decimals=2):
     latest = pair[0] if pair else None
     if not latest:
-        return "n/a"
+        return "未更新"
     return f"{latest[1]:.{decimals}f}"
 
 
+def has_latest(pair):
+    latest = pair[0] if pair else None
+    return latest is not None
+
+
 def fmt_quote(key, pairs, changes):
-    return f"{label_for_key(key)} {fmt_level(pairs.get(key), decimals_for_key(key))} ({fmt_pct(changes.get(f'{key}_pct'))})"
+    pair = pairs.get(key)
+    if not has_latest(pair):
+        return None
+    pct = pct_for_key(key, changes)
+    change = f" ({fmt_pct(pct)})" if pct is not None else ""
+    return f"{label_for_key(key)} {fmt_level(pair, decimals_for_key(key))}{change}"
+
+
+def fmt_quote_list(keys, pairs, changes):
+    items = [fmt_quote(key, pairs, changes) for key in keys]
+    items = [item for item in items if item]
+    if not items:
+        return "暂无可用报价"
+    return "；".join(items)
+
+
+def fmt_level_change(label, pair, change, decimals=2, suffix="", change_formatter=fmt_pct):
+    if not has_latest(pair):
+        return f"{label} 未更新"
+    change_text = f" ({change_formatter(change)})" if change is not None else ""
+    return f"{label} {fmt_level(pair, decimals)}{suffix}{change_text}"
+
+
+def any_latest(pairs, keys):
+    return any(has_latest(pairs.get(key)) for key in keys)
+
+
+def fmt_rates_line(pairs, changes):
+    keys = [("2Y", "DGS2"), ("10Y", "DGS10"), ("30Y", "DGS30")]
+    if not any_latest(pairs, [key for _, key in keys]):
+        return "1. 利率：核心美债收益率暂未取到，先不据此判断长端压力。"
+    items = [
+        fmt_level_change(label, pairs[key], changes[f"{key}_bp"], suffix="%", change_formatter=fmt_bp)
+        for label, key in keys
+    ]
+    return f"1. 利率：{'；'.join(items)}。"
+
+
+def fmt_real_rate_line(pairs, changes):
+    keys = [("10Y real", "DFII10"), ("10Y breakeven", "T10YIE")]
+    if not any_latest(pairs, [key for _, key in keys]):
+        return "2. 实际利率/通胀预期：相关序列暂未取到，先看名义利率和黄金/BTC确认。"
+    items = [
+        fmt_level_change(label, pairs[key], changes[f"{key}_bp"], suffix="%", change_formatter=fmt_bp)
+        for label, key in keys
+    ]
+    return f"2. 实际利率/通胀预期：{'；'.join(items)}。"
+
+
+def fmt_cross_asset_line(pairs, changes):
+    keys = ["DTWEXBGS", "GOLD", "BTC"]
+    if not any_latest(pairs, keys):
+        return "3. 跨资产：美元、黄金、BTC 报价暂未取到，先不据此判断美元信用交易。"
+    items = [
+        fmt_level_change("Broad USD", pairs["DTWEXBGS"], changes["DTWEXBGS_pct"]),
+        fmt_level_change("黄金", pairs["GOLD"], changes["GOLD_pct"]),
+        fmt_level_change("BTC", pairs["BTC"], changes["BTC_pct"], decimals=0),
+    ]
+    return f"3. 跨资产：{'；'.join(items)}。"
+
+
+def fmt_credit_liquidity_line(pairs, changes):
+    keys = ["BAMLH0A0HYM2", "SOFR", "EFFR"]
+    if not any_latest(pairs, keys):
+        return "8. 信用/流动性：HY OAS、SOFR、EFFR 暂未取到，先不据此判断信用扩散。"
+    items = [
+        fmt_level_change("HY OAS", pairs["BAMLH0A0HYM2"], changes["BAMLH0A0HYM2_bp"], suffix="%", change_formatter=fmt_bp),
+        fmt_level_change("SOFR", pairs["SOFR"], changes["SOFR_bp"], suffix="%", change_formatter=fmt_bp),
+        fmt_level_change("EFFR", pairs["EFFR"], changes["EFFR_bp"], suffix="%", change_formatter=fmt_bp),
+    ]
+    return f"8. 信用/流动性：{'；'.join(items)}。"
+
+
+def fmt_usd_level(pair, unit):
+    value = pair[0][1]
+    if unit == "millions":
+        billion = value / 1_000.0
+    else:
+        billion = value
+    if abs(billion) >= 100:
+        return f"{billion / 1_000.0:.2f}万亿美元"
+    return f"{billion:.1f}十亿美元"
+
+
+def fmt_fed_balance_item(label, key, pair, change):
+    if not has_latest(pair):
+        return None
+    change_text = f" ({fmt_pct(change)})" if change is not None else ""
+    return f"{label} {fmt_usd_level(pair, FED_BALANCE_UNITS[key])}{change_text}"
+
+
+def fmt_fed_balance_line(pairs, changes):
+    items = [
+        fmt_fed_balance_item("总资产", "WALCL", pairs["WALCL"], changes["WALCL_pct"]),
+        fmt_fed_balance_item("准备金", "RESBALNS", pairs["RESBALNS"], changes["RESBALNS_pct"]),
+        fmt_fed_balance_item("ON RRP", "RRPONTSYD", pairs["RRPONTSYD"], changes["RRPONTSYD_pct"]),
+        fmt_fed_balance_item("贴现窗口", "DPCREDIT", pairs["DPCREDIT"], changes["DPCREDIT_pct"]),
+    ]
+    items = [item for item in items if item]
+    if not items:
+        return "9. Fed表：H.4.1/FRED 周更数据暂未取到，先不据此判断准备金和QT压力。"
+    return f"9. Fed表：{'；'.join(items)}。"
+
+
+def visible_fetch_error_keys(pairs):
+    priority = {key: index for index, key in enumerate(ERROR_PRIORITY)}
+    keys = []
+    for key in FETCH_ERRORS:
+        if key == "SP500" and has_latest(pairs.get("SPY")):
+            continue
+        if key == "NASDAQCOM" and has_latest(pairs.get("QQQ")):
+            continue
+        keys.append(key)
+    return sorted(keys, key=lambda key: (priority.get(key, 999), label_for_key(key)))
 
 
 def pct_for_key(key, changes):
@@ -310,7 +601,7 @@ def ranked_keys(keys, changes, reverse):
 
 def fmt_movers(keys, changes, count=3):
     if not keys:
-        return "n/a"
+        return "暂无可用"
     return "、".join(f"{label_for_key(key)} {fmt_pct(pct_for_key(key, changes))}" for key in keys[:count])
 
 
@@ -333,7 +624,7 @@ def fmt_ai_group_summary(changes):
     ranked = [(group, avg_pct(group[1], changes)) for group in AI_GROUPS]
     ranked = [(group, average) for group, average in ranked if average is not None]
     if not ranked:
-        return "n/a"
+        return "暂无可用"
     strong = [group for group, _ in sorted(ranked, key=lambda item: item[1], reverse=True)[:3]]
     weak = [group for group, _ in sorted(ranked, key=lambda item: item[1])[:2]]
     strong_text = "；".join(fmt_ai_group_item(group, changes, True) for group in strong)
@@ -458,7 +749,29 @@ def report_window(now_et):
     return "盘中更新"
 
 
+def derive_t10y_breakeven(pairs):
+    if has_latest(pairs.get("T10YIE")):
+        return
+    nominal = pairs.get("DGS10")
+    real = pairs.get("DFII10")
+    if not has_latest(nominal) or not has_latest(real):
+        return
+    if nominal[0][0] != real[0][0]:
+        return
+
+    latest = (nominal[0][0], nominal[0][1] - real[0][1])
+    previous = None
+    if nominal[1] and real[1] and nominal[1][0] == real[1][0]:
+        previous = (nominal[1][0], nominal[1][1] - real[1][1])
+    pairs["T10YIE"] = (latest, previous)
+    DATA_SOURCES["T10YIE"] = "Treasury/FRED derived"
+    FETCH_ERRORS.pop("T10YIE", None)
+
+
 def fetch_all_pairs():
+    FETCH_ERRORS.clear()
+    MARKET_SOURCES.clear()
+    DATA_SOURCES.clear()
     pairs = {}
     max_workers = min(20, len(SERIES) + len(MARKET_QUOTES))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -474,6 +787,7 @@ def fetch_all_pairs():
             except Exception as exc:
                 FETCH_ERRORS[key] = str(exc)
                 pairs[key] = (None, None)
+    derive_t10y_breakeven(pairs)
     return pairs
 
 
@@ -584,7 +898,7 @@ def build_message(now_utc=None, classification=None):
     sector_losers = ranked_keys(SECTOR_KEYS, changes, reverse=False)
     ai_stock_winners = ranked_keys(AI_STOCK_KEYS, changes, reverse=True)
     ai_stock_losers = ranked_keys(AI_STOCK_KEYS, changes, reverse=False)
-    index_line = "；".join(fmt_quote(key, pairs, changes) for key in INDEX_KEYS)
+    index_line = fmt_quote_list(INDEX_KEYS, pairs, changes)
 
     lines = [
         "【Fed/美元信用监控】",
@@ -594,15 +908,15 @@ def build_message(now_utc=None, classification=None):
         f"结论：{conclusion}",
         "",
         "关键变化：",
-        f"1. 利率：2Y {fmt_level(pairs['DGS2'])}% ({fmt_bp(changes['DGS2_bp'])})；10Y {fmt_level(pairs['DGS10'])}% ({fmt_bp(changes['DGS10_bp'])})；30Y {fmt_level(pairs['DGS30'])}% ({fmt_bp(changes['DGS30_bp'])})。",
-        f"2. 实际利率/通胀预期：10Y real {fmt_level(pairs['DFII10'])}% ({fmt_bp(changes['DFII10_bp'])})；10Y breakeven {fmt_level(pairs['T10YIE'])}% ({fmt_bp(changes['T10YIE_bp'])})。",
-        f"3. 跨资产：Broad USD {fmt_pct(changes['DTWEXBGS_pct'])}；黄金 {fmt_level(pairs['GOLD'])} ({fmt_pct(changes['GOLD_pct'])})；BTC {fmt_level(pairs['BTC'], 0)} ({fmt_pct(changes['BTC_pct'])})。",
+        fmt_rates_line(pairs, changes),
+        fmt_real_rate_line(pairs, changes),
+        fmt_cross_asset_line(pairs, changes),
         f"4. 美股指数：{index_line}。",
         f"5. AI细分：{fmt_ai_group_summary(changes)}。",
         f"6. AI个股：强 {fmt_movers(ai_stock_winners, changes)}；弱 {fmt_movers(ai_stock_losers, changes)}。",
         f"7. 大类板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
-        f"8. 信用/流动性：HY OAS {fmt_level(pairs['BAMLH0A0HYM2'])}% ({fmt_bp(changes['BAMLH0A0HYM2_bp'])})；SOFR {fmt_level(pairs['SOFR'])}%；EFFR {fmt_level(pairs['EFFR'])}%。",
-        f"9. Fed表：总资产 {fmt_pct(changes['WALCL_pct'])}；准备金 {fmt_pct(changes['RESBALNS_pct'])}；ON RRP {fmt_pct(changes['RRPONTSYD_pct'])}；贴现窗口 {fmt_pct(changes['DPCREDIT_pct'])}。",
+        fmt_credit_liquidity_line(pairs, changes),
+        fmt_fed_balance_line(pairs, changes),
         "",
         "对资产：",
         btc_line,
@@ -613,13 +927,20 @@ def build_message(now_utc=None, classification=None):
         "",
         "注：这是云端规则版快报，侧重公开数据和阈值判断；Fed讲话/新闻语义仍建议用人工或LLM复核。",
     ]
-    if FETCH_ERRORS:
-        missing = "、".join(label_for_key(sid) for sid in sorted(FETCH_ERRORS)[:5])
-        suffix = "等" if len(FETCH_ERRORS) > 5 else ""
+    visible_errors = visible_fetch_error_keys(pairs)
+    if visible_errors:
+        missing = "、".join(label_for_key(sid) for sid in visible_errors[:5])
+        suffix = "等" if len(visible_errors) > 5 else ""
         lines.append(f"数据提示：{missing}{suffix} 暂未更新或无法读取。")
+    source_notes = []
     if MARKET_SOURCES:
         sources = "、".join(sorted(set(MARKET_SOURCES.values())))
-        lines.append(f"行情源：市场报价 {sources}；宏观/利率序列 FRED。")
+        source_notes.append(f"市场报价 {sources}")
+    if DATA_SOURCES:
+        sources = "、".join(sorted(set(DATA_SOURCES.values())))
+        source_notes.append(f"宏观/利率序列 {sources}")
+    if source_notes:
+        lines.append(f"行情源：{'；'.join(source_notes)}。")
     if classification and classification.get("is_backup"):
         lines.append("触发说明：这是备用补发窗口；若主窗口已成功发送，本次会被自动跳过。")
     return "\n".join(lines)
