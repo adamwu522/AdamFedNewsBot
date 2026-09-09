@@ -8,7 +8,7 @@ Twice a day it sends a Telegram message covering:
 
 - 2Y, 10Y, and 30Y Treasury yields.
 - 10Y real yield and 10Y breakeven inflation.
-- Broad dollar, gold, BTC, S&P 500, and Nasdaq.
+- Broad dollar, gold, BTC, S&P 500, and Nasdaq. Gold and BTC use public market-quote sources instead of FRED.
 - High-yield credit spread and short-term funding rates.
 - Fed balance sheet proxies: total assets, reserve balances, ON RRP, and discount-window borrowing.
 - A green/yellow/orange/red risk light and short implications for BTC, gold, and US equities.

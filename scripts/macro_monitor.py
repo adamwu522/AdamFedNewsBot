@@ -9,6 +9,8 @@ import urllib.request
 from zoneinfo import ZoneInfo
 
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+STOOQ_DAILY_URL = "https://stooq.com/q/d/l/"
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
 
 SERIES = {
     "DGS2": "2Y",
@@ -19,8 +21,6 @@ SERIES = {
     "BAMLH0A0HYM2": "HY OAS",
     "SP500": "S&P 500",
     "NASDAQCOM": "Nasdaq",
-    "CBBTCUSD": "BTC",
-    "GOLDAMGBD228NLBM": "Gold",
     "DTWEXBGS": "Broad USD",
     "SOFR": "SOFR",
     "EFFR": "EFFR",
@@ -28,6 +28,11 @@ SERIES = {
     "RESBALNS": "Reserve balances",
     "RRPONTSYD": "ON RRP",
     "DPCREDIT": "Discount window",
+}
+
+MARKET_QUOTES = {
+    "GOLD": {"label": "Gold", "stooq": "xauusd", "yahoo": "GC=F"},
+    "BTC": {"label": "BTC", "stooq": "btcusd", "yahoo": "BTC-USD"},
 }
 
 EVENTS = [
@@ -42,6 +47,7 @@ EVENTS = [
 
 
 FETCH_ERRORS = {}
+MARKET_SOURCES = {}
 
 
 def fetch_latest_pair(series_id):
@@ -75,21 +81,88 @@ def fetch_latest_pair(series_id):
     return values[-1], values[-2]
 
 
-def latest_pair(rows, series_id):
+def label_for_key(key):
+    if key in SERIES:
+        return SERIES[key]
+    if key in MARKET_QUOTES:
+        return MARKET_QUOTES[key]["label"]
+    return key
+
+
+def fetch_stooq_pair(symbol):
+    params = urllib.parse.urlencode({"s": symbol, "i": "d"})
+    request = urllib.request.Request(
+        f"{STOOQ_DAILY_URL}?{params}",
+        headers={"User-Agent": "macro-telegram-monitor/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        text = response.read().decode("utf-8")
+
     values = []
-    for row in rows:
-        raw = row.get(series_id, "").strip()
-        if not raw or raw == ".":
+    for row in csv.DictReader(text.splitlines()):
+        raw = row.get("Close", "").strip()
+        date_text = row.get("Date", "").strip()
+        if not raw or raw.lower() in {"null", "n/a"} or not date_text:
             continue
         try:
-            values.append((row["observation_date"], float(raw)))
+            values.append((date_text, float(raw)))
         except ValueError:
             continue
+
     if not values:
-        return None, None
+        raise RuntimeError("Stooq returned no usable values")
     if len(values) == 1:
         return values[-1], None
     return values[-1], values[-2]
+
+
+def fetch_yahoo_pair(symbol):
+    encoded_symbol = urllib.parse.quote(symbol, safe="")
+    params = urllib.parse.urlencode({"range": "10d", "interval": "1d"})
+    request = urllib.request.Request(
+        f"{YAHOO_CHART_URL}{encoded_symbol}?{params}",
+        headers={"User-Agent": "macro-telegram-monitor/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+
+    result = (payload.get("chart") or {}).get("result") or []
+    if not result:
+        raise RuntimeError("Yahoo returned no chart result")
+    closes = (((result[0].get("indicators") or {}).get("quote") or [{}])[0]).get("close") or []
+    timestamps = result[0].get("timestamp") or []
+    values = []
+    for timestamp, close in zip(timestamps, closes):
+        if close is None:
+            continue
+        date_text = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).date().isoformat()
+        values.append((date_text, float(close)))
+    if not values:
+        raise RuntimeError("Yahoo returned no usable values")
+    if len(values) == 1:
+        return values[-1], None
+    return values[-1], values[-2]
+
+
+def fetch_market_pair(key):
+    quote = MARKET_QUOTES[key]
+    errors = []
+    try:
+        pair = fetch_yahoo_pair(quote["yahoo"])
+        MARKET_SOURCES[key] = "Yahoo"
+        return pair
+    except Exception as exc:
+        errors.append(f"Yahoo: {exc}")
+
+    try:
+        pair = fetch_stooq_pair(quote["stooq"])
+        MARKET_SOURCES[key] = "Stooq"
+        return pair
+    except Exception as exc:
+        errors.append(f"Stooq: {exc}")
+
+    FETCH_ERRORS[key] = "; ".join(errors)
+    return None, None
 
 
 def change_bp(pair):
@@ -141,8 +214,8 @@ def risk_and_conclusion(changes):
     d10 = changes.get("DGS10_bp")
     d2 = changes.get("DGS2_bp")
     usd = changes.get("DTWEXBGS_pct")
-    gold = changes.get("GOLDAMGBD228NLBM_pct")
-    btc = changes.get("CBBTCUSD_pct")
+    gold = changes.get("GOLD_pct")
+    btc = changes.get("BTC_pct")
     spx = changes.get("SP500_pct")
     hy = changes.get("BAMLH0A0HYM2_bp")
 
@@ -167,8 +240,8 @@ def risk_and_conclusion(changes):
 
 
 def asset_implications(risk, changes):
-    btc = changes.get("CBBTCUSD_pct")
-    gold = changes.get("GOLDAMGBD228NLBM_pct")
+    btc = changes.get("BTC_pct")
+    gold = changes.get("GOLD_pct")
     spx = changes.get("SP500_pct")
     d30 = changes.get("DGS30_bp")
     usd = changes.get("DTWEXBGS_pct")
@@ -201,6 +274,7 @@ def build_message():
     now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
 
     pairs = {sid: fetch_latest_pair(sid) for sid in SERIES}
+    pairs.update({key: fetch_market_pair(key) for key in MARKET_QUOTES})
     changes = {
         "DGS2_bp": change_bp(pairs["DGS2"]),
         "DGS10_bp": change_bp(pairs["DGS10"]),
@@ -210,8 +284,8 @@ def build_message():
         "BAMLH0A0HYM2_bp": change_bp(pairs["BAMLH0A0HYM2"]),
         "SP500_pct": change_pct(pairs["SP500"]),
         "NASDAQCOM_pct": change_pct(pairs["NASDAQCOM"]),
-        "CBBTCUSD_pct": change_pct(pairs["CBBTCUSD"]),
-        "GOLDAMGBD228NLBM_pct": change_pct(pairs["GOLDAMGBD228NLBM"]),
+        "BTC_pct": change_pct(pairs["BTC"]),
+        "GOLD_pct": change_pct(pairs["GOLD"]),
         "DTWEXBGS_pct": change_pct(pairs["DTWEXBGS"]),
         "SOFR_bp": change_bp(pairs["SOFR"]),
         "EFFR_bp": change_bp(pairs["EFFR"]),
@@ -233,7 +307,7 @@ def build_message():
         "关键变化：",
         f"1. 利率：2Y {fmt_level(pairs['DGS2'])}% ({fmt_bp(changes['DGS2_bp'])})；10Y {fmt_level(pairs['DGS10'])}% ({fmt_bp(changes['DGS10_bp'])})；30Y {fmt_level(pairs['DGS30'])}% ({fmt_bp(changes['DGS30_bp'])})。",
         f"2. 实际利率/通胀预期：10Y real {fmt_level(pairs['DFII10'])}% ({fmt_bp(changes['DFII10_bp'])})；10Y breakeven {fmt_level(pairs['T10YIE'])}% ({fmt_bp(changes['T10YIE_bp'])})。",
-        f"3. 跨资产：Broad USD {fmt_pct(changes['DTWEXBGS_pct'])}；黄金 {fmt_pct(changes['GOLDAMGBD228NLBM_pct'])}；BTC {fmt_pct(changes['CBBTCUSD_pct'])}；标普 {fmt_pct(changes['SP500_pct'])}；纳指 {fmt_pct(changes['NASDAQCOM_pct'])}。",
+        f"3. 跨资产：Broad USD {fmt_pct(changes['DTWEXBGS_pct'])}；黄金 {fmt_level(pairs['GOLD'])} ({fmt_pct(changes['GOLD_pct'])})；BTC {fmt_level(pairs['BTC'], 0)} ({fmt_pct(changes['BTC_pct'])})；标普 {fmt_pct(changes['SP500_pct'])}；纳指 {fmt_pct(changes['NASDAQCOM_pct'])}。",
         f"4. 信用/流动性：HY OAS {fmt_level(pairs['BAMLH0A0HYM2'])}% ({fmt_bp(changes['BAMLH0A0HYM2_bp'])})；SOFR {fmt_level(pairs['SOFR'])}%；EFFR {fmt_level(pairs['EFFR'])}%。",
         f"5. Fed表：总资产 {fmt_pct(changes['WALCL_pct'])}；准备金 {fmt_pct(changes['RESBALNS_pct'])}；ON RRP {fmt_pct(changes['RRPONTSYD_pct'])}；贴现窗口 {fmt_pct(changes['DPCREDIT_pct'])}。",
         "",
@@ -247,9 +321,12 @@ def build_message():
         "注：这是云端规则版快报，侧重公开数据和阈值判断；Fed讲话/新闻语义仍建议用人工或LLM复核。",
     ]
     if FETCH_ERRORS:
-        missing = "、".join(SERIES.get(sid, sid) for sid in sorted(FETCH_ERRORS)[:5])
+        missing = "、".join(label_for_key(sid) for sid in sorted(FETCH_ERRORS)[:5])
         suffix = "等" if len(FETCH_ERRORS) > 5 else ""
         lines.append(f"数据提示：{missing}{suffix} 暂未更新或无法读取。")
+    if MARKET_SOURCES:
+        sources = "；".join(f"{label_for_key(key)} {source}" for key, source in MARKET_SOURCES.items())
+        lines.append(f"行情源：{sources}。")
     return "\n".join(lines)
 
 
