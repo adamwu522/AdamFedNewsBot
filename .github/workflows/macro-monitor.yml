@@ -8,7 +8,16 @@ on:
     - cron: "40 0,12,14,18 * * *"
     # US standard time: 08:40, 10:40, 14:40, 20:40 New York.
     - cron: "40 1,13,15,19 * * *"
+    # Backup triggers, 30 minutes after each target window.
+    - cron: "10 1,13,15,19 * * *"
+    - cron: "10 2,14,16,20 * * *"
+    # Daily health check at 07:10 New York.
+    - cron: "10 11,12 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: macro-telegram-monitor
+  cancel-in-progress: false
 
 jobs:
   send-monitor:
@@ -18,8 +27,44 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v5
 
+      - name: Classify alert window
+        id: classify
+        run: python3 scripts/macro_monitor.py --classify
+
+      - name: Restore send marker
+        id: sent-marker
+        if: steps.classify.outputs.should_send == 'true' && steps.classify.outputs.window_key != ''
+        uses: actions/cache/restore@v6
+        with:
+          path: .monitor-state/${{ steps.classify.outputs.window_key }}
+          key: macro-sent-${{ steps.classify.outputs.window_key }}
+          lookup-only: true
+
+      - name: Skip duplicate scheduled window
+        if: steps.classify.outputs.should_send == 'true' && steps.classify.outputs.window_key != '' && steps.sent-marker.outputs.cache-hit == 'true'
+        run: echo "Already sent ${{ steps.classify.outputs.window_key }}; skipping duplicate or backup trigger."
+
       - name: Run monitor and send Telegram message
+        if: steps.classify.outputs.should_send == 'true' && (steps.classify.outputs.window_key == '' || steps.sent-marker.outputs.cache-hit != 'true')
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MONITOR_ALERT_TYPE: ${{ steps.classify.outputs.alert_type }}
+          MONITOR_WINDOW_LABEL: ${{ steps.classify.outputs.window_label }}
+          MONITOR_WINDOW_KEY: ${{ steps.classify.outputs.window_key }}
+          MONITOR_IS_BACKUP: ${{ steps.classify.outputs.is_backup }}
+          MONITOR_SHOULD_SEND: ${{ steps.classify.outputs.should_send }}
         run: python3 scripts/macro_monitor.py
+
+      - name: Create send marker
+        if: steps.classify.outputs.should_send == 'true' && steps.classify.outputs.window_key != '' && steps.sent-marker.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ".monitor-state/${{ steps.classify.outputs.window_key }}"
+          date -u > ".monitor-state/${{ steps.classify.outputs.window_key }}/sent.txt"
+
+      - name: Save send marker
+        if: steps.classify.outputs.should_send == 'true' && steps.classify.outputs.window_key != '' && steps.sent-marker.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .monitor-state/${{ steps.classify.outputs.window_key }}
+          key: macro-sent-${{ steps.classify.outputs.window_key }}

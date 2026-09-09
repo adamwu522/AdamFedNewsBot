@@ -4,6 +4,7 @@ import datetime as dt
 import json
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,8 @@ from zoneinfo import ZoneInfo
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 STOOQ_DAILY_URL = "https://stooq.com/q/d/l/"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
+TELEGRAM_MAX_ATTEMPTS = 5
+TELEGRAM_RETRY_BASE_SECONDS = 2
 
 SERIES = {
     "DGS2": "2Y",
@@ -51,13 +54,41 @@ MARKET_QUOTES = {
     "XLB": {"label": "材料", "yahoo": "XLB", "decimals": 2},
     "SMH": {"label": "半导体", "yahoo": "SMH", "decimals": 2},
     "NVDA": {"label": "NVDA", "yahoo": "NVDA", "decimals": 2},
+    "AMD": {"label": "AMD", "yahoo": "AMD", "decimals": 2},
+    "ARM": {"label": "ARM", "yahoo": "ARM", "decimals": 2},
+    "TSM": {"label": "TSM", "yahoo": "TSM", "decimals": 2},
     "AAPL": {"label": "AAPL", "yahoo": "AAPL", "decimals": 2},
     "MSFT": {"label": "MSFT", "yahoo": "MSFT", "decimals": 2},
     "AMZN": {"label": "AMZN", "yahoo": "AMZN", "decimals": 2},
     "GOOGL": {"label": "GOOGL", "yahoo": "GOOGL", "decimals": 2},
     "META": {"label": "META", "yahoo": "META", "decimals": 2},
+    "ORCL": {"label": "ORCL", "yahoo": "ORCL", "decimals": 2},
     "TSLA": {"label": "TSLA", "yahoo": "TSLA", "decimals": 2},
     "AVGO": {"label": "AVGO", "yahoo": "AVGO", "decimals": 2},
+    "MU": {"label": "美光", "yahoo": "MU", "decimals": 2},
+    "SNDK": {"label": "闪迪", "yahoo": "SNDK", "decimals": 2},
+    "WDC": {"label": "WDC", "yahoo": "WDC", "decimals": 2},
+    "STX": {"label": "STX", "yahoo": "STX", "decimals": 2},
+    "000660.KS": {"label": "海力士", "yahoo": "000660.KS", "decimals": 0},
+    "005930.KS": {"label": "三星电子", "yahoo": "005930.KS", "decimals": 0},
+    "ASML": {"label": "ASML", "yahoo": "ASML", "decimals": 2},
+    "AMAT": {"label": "AMAT", "yahoo": "AMAT", "decimals": 2},
+    "LRCX": {"label": "LRCX", "yahoo": "LRCX", "decimals": 2},
+    "KLAC": {"label": "KLAC", "yahoo": "KLAC", "decimals": 2},
+    "SNPS": {"label": "SNPS", "yahoo": "SNPS", "decimals": 2},
+    "CDNS": {"label": "CDNS", "yahoo": "CDNS", "decimals": 2},
+    "ANET": {"label": "ANET", "yahoo": "ANET", "decimals": 2},
+    "MRVL": {"label": "MRVL", "yahoo": "MRVL", "decimals": 2},
+    "COHR": {"label": "COHR", "yahoo": "COHR", "decimals": 2},
+    "LITE": {"label": "LITE", "yahoo": "LITE", "decimals": 2},
+    "SMCI": {"label": "SMCI", "yahoo": "SMCI", "decimals": 2},
+    "DELL": {"label": "DELL", "yahoo": "DELL", "decimals": 2},
+    "HPE": {"label": "HPE", "yahoo": "HPE", "decimals": 2},
+    "VRT": {"label": "VRT", "yahoo": "VRT", "decimals": 2},
+    "VST": {"label": "VST", "yahoo": "VST", "decimals": 2},
+    "CEG": {"label": "CEG", "yahoo": "CEG", "decimals": 2},
+    "ETN": {"label": "ETN", "yahoo": "ETN", "decimals": 2},
+    "GEV": {"label": "GEV", "yahoo": "GEV", "decimals": 2},
     "JPM": {"label": "JPM", "yahoo": "JPM", "decimals": 2},
     "XOM": {"label": "XOM", "yahoo": "XOM", "decimals": 2},
     "UNH": {"label": "UNH", "yahoo": "UNH", "decimals": 2},
@@ -67,7 +98,16 @@ MARKET_QUOTES = {
 
 INDEX_KEYS = ["SPY", "QQQ", "DIA", "IWM"]
 SECTOR_KEYS = ["XLK", "XLC", "XLY", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLRE", "XLB", "SMH"]
-STOCK_KEYS = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "JPM", "XOM", "UNH", "COIN", "MSTR"]
+AI_GROUPS = [
+    ("AI芯片/GPU", ["NVDA", "AMD", "AVGO", "ARM", "TSM"]),
+    ("存储/HBM/NAND", ["MU", "SNDK", "WDC", "STX", "000660.KS", "005930.KS"]),
+    ("设备/EDA", ["ASML", "AMAT", "LRCX", "KLAC", "SNPS", "CDNS"]),
+    ("网络/光模块", ["ANET", "MRVL", "COHR", "LITE"]),
+    ("服务器/散热", ["SMCI", "DELL", "HPE", "VRT"]),
+    ("云/平台", ["MSFT", "AMZN", "GOOGL", "META", "ORCL"]),
+    ("电力/数据中心", ["VST", "CEG", "ETN", "GEV"]),
+]
+AI_STOCK_KEYS = list(dict.fromkeys(key for _, keys in AI_GROUPS for key in keys))
 TARGET_ET_WINDOWS = [
     (8, 40, "数据发布窗口"),
     (10, 40, "美股开盘确认"),
@@ -75,6 +115,9 @@ TARGET_ET_WINDOWS = [
     (20, 40, "美股收盘总结"),
 ]
 SCHEDULE_GATE_GRACE_MINUTES = 50
+BACKUP_TRIGGER_OFFSET_MINUTES = 30
+HEALTH_CHECK_ET_WINDOW = (7, 10, "系统健康检查")
+HEALTH_CHECK_GRACE_MINUTES = 35
 
 EVENTS = [
     ("2026-09-09T08:30:00-04:00", "财政部长端美债回购加码开始"),
@@ -271,27 +314,138 @@ def fmt_movers(keys, changes, count=3):
     return "、".join(f"{label_for_key(key)} {fmt_pct(pct_for_key(key, changes))}" for key in keys[:count])
 
 
+def avg_pct(keys, changes):
+    values = [pct_for_key(key, changes) for key in keys]
+    values = [value for value in values if value is not None]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def fmt_ai_group_item(group, changes, reverse):
+    label, keys = group
+    average = avg_pct(keys, changes)
+    leaders = ranked_keys(keys, changes, reverse=reverse)
+    return f"{label} {fmt_pct(average)}（{fmt_movers(leaders, changes, 2)}）"
+
+
+def fmt_ai_group_summary(changes):
+    ranked = [(group, avg_pct(group[1], changes)) for group in AI_GROUPS]
+    ranked = [(group, average) for group, average in ranked if average is not None]
+    if not ranked:
+        return "n/a"
+    strong = [group for group, _ in sorted(ranked, key=lambda item: item[1], reverse=True)[:3]]
+    weak = [group for group, _ in sorted(ranked, key=lambda item: item[1])[:2]]
+    strong_text = "；".join(fmt_ai_group_item(group, changes, True) for group in strong)
+    weak_text = "；".join(fmt_ai_group_item(group, changes, False) for group in weak)
+    return f"强 {strong_text}；弱 {weak_text}"
+
+
 def matched_target_window(now_et):
     minutes = now_et.hour * 60 + now_et.minute
     for hour, minute, label in TARGET_ET_WINDOWS:
         target = hour * 60 + minute
         if target <= minutes <= target + SCHEDULE_GATE_GRACE_MINUTES:
-            return label
+            return {
+                "alert_type": "market",
+                "hour": hour,
+                "minute": minute,
+                "label": label,
+                "window_key": f"market-{now_et:%Y%m%d}-{hour:02d}{minute:02d}",
+                "is_backup": minutes >= target + BACKUP_TRIGGER_OFFSET_MINUTES,
+                "should_send": True,
+            }
     return None
 
 
-def schedule_skip_reason(now_et):
+def matched_health_check(now_et):
+    hour, minute, label = HEALTH_CHECK_ET_WINDOW
+    minutes = now_et.hour * 60 + now_et.minute
+    target = hour * 60 + minute
+    if target <= minutes <= target + HEALTH_CHECK_GRACE_MINUTES:
+        return {
+            "alert_type": "health",
+            "hour": hour,
+            "minute": minute,
+            "label": label,
+            "window_key": f"health-{now_et:%Y%m%d}",
+            "is_backup": False,
+            "should_send": True,
+        }
+    return None
+
+
+def classify_run(now_et):
     if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+        return {
+            "alert_type": "market",
+            "label": report_window(now_et),
+            "window_key": "",
+            "is_backup": False,
+            "should_send": True,
+        }
+    matched = matched_target_window(now_et) or matched_health_check(now_et)
+    if matched:
+        return matched
+    return {
+        "alert_type": "skip",
+        "label": "跳过",
+        "window_key": "",
+        "is_backup": False,
+        "should_send": False,
+        "skip_reason": f"Scheduled run skipped: {now_et:%Y-%m-%d %H:%M %Z} is outside target New York alert windows.",
+    }
+
+
+def env_classification(now_et):
+    alert_type = os.environ.get("MONITOR_ALERT_TYPE")
+    if not alert_type:
         return None
-    if matched_target_window(now_et):
-        return None
-    return f"Scheduled run skipped: {now_et:%Y-%m-%d %H:%M %Z} is outside target New York alert windows."
+    return {
+        "alert_type": alert_type,
+        "label": os.environ.get("MONITOR_WINDOW_LABEL") or report_window(now_et),
+        "window_key": os.environ.get("MONITOR_WINDOW_KEY", ""),
+        "is_backup": os.environ.get("MONITOR_IS_BACKUP") == "true",
+        "should_send": os.environ.get("MONITOR_SHOULD_SEND", "true") == "true",
+    }
+
+
+def write_classification_outputs(classification):
+    lines = []
+    values = {
+        "should_send": str(classification.get("should_send", False)).lower(),
+        "alert_type": classification.get("alert_type", ""),
+        "window_label": classification.get("label", ""),
+        "window_key": classification.get("window_key", ""),
+        "is_backup": str(classification.get("is_backup", False)).lower(),
+    }
+    for key, value in values.items():
+        lines.append(f"{key}={str(value).replace(chr(10), ' ')}")
+
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if output_path:
+        with open(output_path, "a", encoding="utf-8") as output:
+            output.write("\n".join(lines) + "\n")
+    else:
+        print("\n".join(lines))
+
+
+def next_target_window(now_et):
+    tz = now_et.tzinfo
+    for day_offset in range(3):
+        day = (now_et + dt.timedelta(days=day_offset)).date()
+        for hour, minute, label in TARGET_ET_WINDOWS:
+            candidate = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=tz)
+            if candidate > now_et:
+                bj_time = candidate.astimezone(ZoneInfo("Asia/Shanghai"))
+                return f"{candidate:%m-%d %H:%M} ET / 北京时间 {bj_time:%m-%d %H:%M} {label}"
+    return "下一次美东固定观察窗口"
 
 
 def report_window(now_et):
     matched = matched_target_window(now_et)
     if matched:
-        return matched
+        return matched["label"]
     minutes = now_et.hour * 60 + now_et.minute
     if 8 * 60 <= minutes <= 9 * 60 + 20:
         return "数据发布窗口"
@@ -306,7 +460,7 @@ def report_window(now_et):
 
 def fetch_all_pairs():
     pairs = {}
-    max_workers = min(10, len(SERIES) + len(MARKET_QUOTES))
+    max_workers = min(20, len(SERIES) + len(MARKET_QUOTES))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_key = {}
         for sid in SERIES:
@@ -395,11 +549,12 @@ def asset_implications(risk, changes):
     return btc_line, gold_line, stock_line
 
 
-def build_message(now_utc=None):
+def build_message(now_utc=None, classification=None):
     if now_utc is None:
         now_utc = dt.datetime.now(dt.timezone.utc)
     now_bj = now_utc.astimezone(ZoneInfo("Asia/Shanghai"))
     now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+    window_label = (classification or {}).get("label") or report_window(now_et)
 
     pairs = fetch_all_pairs()
     changes = {
@@ -427,14 +582,14 @@ def build_message(now_utc=None):
     btc_line, gold_line, stock_line = asset_implications(risk, changes)
     sector_winners = ranked_keys(SECTOR_KEYS, changes, reverse=True)
     sector_losers = ranked_keys(SECTOR_KEYS, changes, reverse=False)
-    stock_winners = ranked_keys(STOCK_KEYS, changes, reverse=True)
-    stock_losers = ranked_keys(STOCK_KEYS, changes, reverse=False)
+    ai_stock_winners = ranked_keys(AI_STOCK_KEYS, changes, reverse=True)
+    ai_stock_losers = ranked_keys(AI_STOCK_KEYS, changes, reverse=False)
     index_line = "；".join(fmt_quote(key, pairs, changes) for key in INDEX_KEYS)
 
     lines = [
         "【Fed/美元信用监控】",
         f"时间：北京时间 {now_bj:%m-%d %H:%M} / 美东时间 {now_et:%m-%d %H:%M}",
-        f"窗口：{report_window(now_et)}",
+        f"窗口：{window_label}",
         f"风险灯号：{risk}",
         f"结论：{conclusion}",
         "",
@@ -443,10 +598,11 @@ def build_message(now_utc=None):
         f"2. 实际利率/通胀预期：10Y real {fmt_level(pairs['DFII10'])}% ({fmt_bp(changes['DFII10_bp'])})；10Y breakeven {fmt_level(pairs['T10YIE'])}% ({fmt_bp(changes['T10YIE_bp'])})。",
         f"3. 跨资产：Broad USD {fmt_pct(changes['DTWEXBGS_pct'])}；黄金 {fmt_level(pairs['GOLD'])} ({fmt_pct(changes['GOLD_pct'])})；BTC {fmt_level(pairs['BTC'], 0)} ({fmt_pct(changes['BTC_pct'])})。",
         f"4. 美股指数：{index_line}。",
-        f"5. 美股板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
-        f"6. 重点个股：强 {fmt_movers(stock_winners, changes)}；弱 {fmt_movers(stock_losers, changes)}。",
-        f"7. 信用/流动性：HY OAS {fmt_level(pairs['BAMLH0A0HYM2'])}% ({fmt_bp(changes['BAMLH0A0HYM2_bp'])})；SOFR {fmt_level(pairs['SOFR'])}%；EFFR {fmt_level(pairs['EFFR'])}%。",
-        f"8. Fed表：总资产 {fmt_pct(changes['WALCL_pct'])}；准备金 {fmt_pct(changes['RESBALNS_pct'])}；ON RRP {fmt_pct(changes['RRPONTSYD_pct'])}；贴现窗口 {fmt_pct(changes['DPCREDIT_pct'])}。",
+        f"5. AI细分：{fmt_ai_group_summary(changes)}。",
+        f"6. AI个股：强 {fmt_movers(ai_stock_winners, changes)}；弱 {fmt_movers(ai_stock_losers, changes)}。",
+        f"7. 大类板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
+        f"8. 信用/流动性：HY OAS {fmt_level(pairs['BAMLH0A0HYM2'])}% ({fmt_bp(changes['BAMLH0A0HYM2_bp'])})；SOFR {fmt_level(pairs['SOFR'])}%；EFFR {fmt_level(pairs['EFFR'])}%。",
+        f"9. Fed表：总资产 {fmt_pct(changes['WALCL_pct'])}；准备金 {fmt_pct(changes['RESBALNS_pct'])}；ON RRP {fmt_pct(changes['RRPONTSYD_pct'])}；贴现窗口 {fmt_pct(changes['DPCREDIT_pct'])}。",
         "",
         "对资产：",
         btc_line,
@@ -464,7 +620,25 @@ def build_message(now_utc=None):
     if MARKET_SOURCES:
         sources = "、".join(sorted(set(MARKET_SOURCES.values())))
         lines.append(f"行情源：市场报价 {sources}；宏观/利率序列 FRED。")
+    if classification and classification.get("is_backup"):
+        lines.append("触发说明：这是备用补发窗口；若主窗口已成功发送，本次会被自动跳过。")
     return "\n".join(lines)
+
+
+def build_health_check_message(now_utc=None):
+    if now_utc is None:
+        now_utc = dt.datetime.now(dt.timezone.utc)
+    now_bj = now_utc.astimezone(ZoneInfo("Asia/Shanghai"))
+    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+    return "\n".join(
+        [
+            "【Fed/美元信用监控｜系统健康检查】",
+            f"时间：北京时间 {now_bj:%m-%d %H:%M} / 美东时间 {now_et:%m-%d %H:%M}",
+            "状态：GitHub Actions 已触发，Telegram 通道可达。",
+            f"下一观察窗口：{next_target_window(now_et)}。",
+            "说明：关键窗口有30分钟后的备用触发；已发送窗口会自动跳过。",
+        ]
+    )
 
 
 def send_telegram(message):
@@ -480,22 +654,43 @@ def send_telegram(message):
             "disable_web_page_preview": "true",
         }
     ).encode("utf-8")
-    request = urllib.request.Request(url, data=data, method="POST")
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    if not payload.get("ok"):
-        raise RuntimeError(f"Telegram API failed: {payload}")
+    last_error = None
+    for attempt in range(1, TELEGRAM_MAX_ATTEMPTS + 1):
+        try:
+            request = urllib.request.Request(url, data=data, method="POST")
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if payload.get("ok"):
+                return
+            last_error = RuntimeError(f"Telegram API failed: {payload}")
+        except Exception as exc:
+            last_error = exc
+
+        if attempt < TELEGRAM_MAX_ATTEMPTS:
+            wait_seconds = min(TELEGRAM_RETRY_BASE_SECONDS ** attempt, 30)
+            print(f"Telegram send attempt {attempt} failed; retrying in {wait_seconds}s: {last_error}", file=sys.stderr)
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(f"Telegram send failed after {TELEGRAM_MAX_ATTEMPTS} attempts: {last_error}")
 
 
 def main():
     now_utc = dt.datetime.now(dt.timezone.utc)
     now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
-    skip_reason = schedule_skip_reason(now_et)
-    if skip_reason:
-        print(skip_reason)
+
+    if "--classify" in sys.argv:
+        write_classification_outputs(classify_run(now_et))
         return
 
-    message = build_message(now_utc)
+    classification = env_classification(now_et) or classify_run(now_et)
+    if not classification.get("should_send", False):
+        print(classification.get("skip_reason", "Scheduled run skipped."))
+        return
+
+    if classification.get("alert_type") == "health":
+        message = build_health_check_message(now_utc)
+    else:
+        message = build_message(now_utc, classification)
     print(message)
     send_telegram(message)
 

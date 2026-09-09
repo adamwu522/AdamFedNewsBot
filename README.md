@@ -4,15 +4,18 @@ This is a GitHub Actions version of the Fed / dollar-credit monitor. It runs in 
 
 ## What It Sends
 
-Four times a day it sends a Telegram message covering:
+Four times a day it sends a Telegram market message covering:
 
 - 2Y, 10Y, and 30Y Treasury yields.
 - 10Y real yield and 10Y breakeven inflation.
 - Broad dollar, gold, BTC, S&P 500, and Nasdaq. Gold and BTC use public market-quote sources instead of FRED.
-- Major US equity index ETFs, sector ETFs, and a watchlist of large/high-signal stocks.
+- Major US equity index ETFs and broad sector ETFs.
+- AI-linked stocks grouped by chips/GPUs, HBM/NAND storage, semiconductor equipment/EDA, networking/optical, servers/cooling, cloud platforms, and data-center power.
 - High-yield credit spread and short-term funding rates.
 - Fed balance sheet proxies: total assets, reserve balances, ON RRP, and discount-window borrowing.
 - A green/yellow/orange/red risk light and short implications for BTC, gold, and US equities.
+
+It also sends one daily health-check message to confirm that GitHub Actions and Telegram delivery are still working.
 
 ## Setup
 
@@ -34,13 +37,21 @@ Target New York windows:
 - `10:40 ET`, about 70 minutes after the US cash open.
 - `14:40 ET`, covering Fed/FOMC, Treasury auctions, and afternoon policy windows.
 - `20:40 ET`, a post-close wake-up recap after US data vendors have settled daily quotes.
+- `07:10 ET`, a short daily health check.
 
 Beijing-time equivalents:
 
-- During US daylight time: `20:40`, `22:40`, `02:40 next day`, `08:40 next day`.
-- During US standard time: `21:40`, `23:40`, `03:40 next day`, `09:40 next day`.
+- During US daylight time, market messages arrive around `20:40`, `22:40`, `02:40 next day`, and `08:40 next day`; the health check arrives around `19:10`.
+- During US standard time, market messages arrive around `21:40`, `23:40`, `03:40 next day`, and `09:40 next day`; the health check arrives around `20:10`.
 
-Scheduled workflows can be delayed by GitHub during busy periods. For market monitoring this is usually acceptable, but it is not a hard real-time alerting system.
+Each market window also has a backup trigger 30 minutes later. The workflow uses an Actions cache marker to skip the backup if the main alert already succeeded.
+
+## Reliability
+
+- Telegram sends are retried up to 5 times with short backoff.
+- Manual `Run workflow` always sends a market message immediately.
+- Scheduled runs outside the New York target windows exit quietly.
+- Backup triggers reduce the chance that a delayed or dropped scheduled run causes a missed alert, but GitHub Actions and mobile push notifications are still not a hard real-time delivery system.
 
 ## Important Limitation
 
