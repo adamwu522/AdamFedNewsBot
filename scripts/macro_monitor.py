@@ -6,6 +6,7 @@ import os
 import sys
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -31,9 +32,49 @@ SERIES = {
 }
 
 MARKET_QUOTES = {
-    "GOLD": {"label": "Gold", "stooq": "xauusd", "yahoo": "GC=F"},
-    "BTC": {"label": "BTC", "stooq": "btcusd", "yahoo": "BTC-USD"},
+    "GOLD": {"label": "Gold", "stooq": "xauusd", "yahoo": "GC=F", "decimals": 2},
+    "BTC": {"label": "BTC", "stooq": "btcusd", "yahoo": "BTC-USD", "decimals": 0},
+    "SPY": {"label": "S&P 500", "yahoo": "SPY", "decimals": 2},
+    "QQQ": {"label": "Nasdaq 100", "yahoo": "QQQ", "decimals": 2},
+    "DIA": {"label": "Dow", "yahoo": "DIA", "decimals": 2},
+    "IWM": {"label": "Russell 2000", "yahoo": "IWM", "decimals": 2},
+    "XLK": {"label": "科技", "yahoo": "XLK", "decimals": 2},
+    "XLC": {"label": "通信", "yahoo": "XLC", "decimals": 2},
+    "XLY": {"label": "可选消费", "yahoo": "XLY", "decimals": 2},
+    "XLF": {"label": "金融", "yahoo": "XLF", "decimals": 2},
+    "XLE": {"label": "能源", "yahoo": "XLE", "decimals": 2},
+    "XLV": {"label": "医疗", "yahoo": "XLV", "decimals": 2},
+    "XLI": {"label": "工业", "yahoo": "XLI", "decimals": 2},
+    "XLP": {"label": "必需消费", "yahoo": "XLP", "decimals": 2},
+    "XLU": {"label": "公用事业", "yahoo": "XLU", "decimals": 2},
+    "XLRE": {"label": "地产", "yahoo": "XLRE", "decimals": 2},
+    "XLB": {"label": "材料", "yahoo": "XLB", "decimals": 2},
+    "SMH": {"label": "半导体", "yahoo": "SMH", "decimals": 2},
+    "NVDA": {"label": "NVDA", "yahoo": "NVDA", "decimals": 2},
+    "AAPL": {"label": "AAPL", "yahoo": "AAPL", "decimals": 2},
+    "MSFT": {"label": "MSFT", "yahoo": "MSFT", "decimals": 2},
+    "AMZN": {"label": "AMZN", "yahoo": "AMZN", "decimals": 2},
+    "GOOGL": {"label": "GOOGL", "yahoo": "GOOGL", "decimals": 2},
+    "META": {"label": "META", "yahoo": "META", "decimals": 2},
+    "TSLA": {"label": "TSLA", "yahoo": "TSLA", "decimals": 2},
+    "AVGO": {"label": "AVGO", "yahoo": "AVGO", "decimals": 2},
+    "JPM": {"label": "JPM", "yahoo": "JPM", "decimals": 2},
+    "XOM": {"label": "XOM", "yahoo": "XOM", "decimals": 2},
+    "UNH": {"label": "UNH", "yahoo": "UNH", "decimals": 2},
+    "COIN": {"label": "COIN", "yahoo": "COIN", "decimals": 2},
+    "MSTR": {"label": "MSTR", "yahoo": "MSTR", "decimals": 2},
 }
+
+INDEX_KEYS = ["SPY", "QQQ", "DIA", "IWM"]
+SECTOR_KEYS = ["XLK", "XLC", "XLY", "XLF", "XLE", "XLV", "XLI", "XLP", "XLU", "XLRE", "XLB", "SMH"]
+STOCK_KEYS = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "JPM", "XOM", "UNH", "COIN", "MSTR"]
+TARGET_ET_WINDOWS = [
+    (8, 40, "数据发布窗口"),
+    (10, 40, "美股开盘确认"),
+    (14, 40, "Fed/FOMC/拍卖窗口"),
+    (20, 40, "美股收盘总结"),
+]
+SCHEDULE_GATE_GRACE_MINUTES = 50
 
 EVENTS = [
     ("2026-09-09T08:30:00-04:00", "财政部长端美债回购加码开始"),
@@ -87,6 +128,12 @@ def label_for_key(key):
     if key in MARKET_QUOTES:
         return MARKET_QUOTES[key]["label"]
     return key
+
+
+def decimals_for_key(key):
+    if key in MARKET_QUOTES:
+        return MARKET_QUOTES[key].get("decimals", 2)
+    return 2
 
 
 def fetch_stooq_pair(symbol):
@@ -154,12 +201,13 @@ def fetch_market_pair(key):
     except Exception as exc:
         errors.append(f"Yahoo: {exc}")
 
-    try:
-        pair = fetch_stooq_pair(quote["stooq"])
-        MARKET_SOURCES[key] = "Stooq"
-        return pair
-    except Exception as exc:
-        errors.append(f"Stooq: {exc}")
+    if quote.get("stooq"):
+        try:
+            pair = fetch_stooq_pair(quote["stooq"])
+            MARKET_SOURCES[key] = "Stooq"
+            return pair
+        except Exception as exc:
+            errors.append(f"Stooq: {exc}")
 
     FETCH_ERRORS[key] = "; ".join(errors)
     return None, None
@@ -200,6 +248,81 @@ def fmt_level(pair, decimals=2):
     return f"{latest[1]:.{decimals}f}"
 
 
+def fmt_quote(key, pairs, changes):
+    return f"{label_for_key(key)} {fmt_level(pairs.get(key), decimals_for_key(key))} ({fmt_pct(changes.get(f'{key}_pct'))})"
+
+
+def pct_for_key(key, changes):
+    pct = changes.get(f"{key}_pct")
+    if pct is None:
+        return None
+    return pct
+
+
+def ranked_keys(keys, changes, reverse):
+    usable = [(key, pct_for_key(key, changes)) for key in keys]
+    usable = [(key, pct) for key, pct in usable if pct is not None]
+    return [key for key, _ in sorted(usable, key=lambda item: item[1], reverse=reverse)]
+
+
+def fmt_movers(keys, changes, count=3):
+    if not keys:
+        return "n/a"
+    return "、".join(f"{label_for_key(key)} {fmt_pct(pct_for_key(key, changes))}" for key in keys[:count])
+
+
+def matched_target_window(now_et):
+    minutes = now_et.hour * 60 + now_et.minute
+    for hour, minute, label in TARGET_ET_WINDOWS:
+        target = hour * 60 + minute
+        if target <= minutes <= target + SCHEDULE_GATE_GRACE_MINUTES:
+            return label
+    return None
+
+
+def schedule_skip_reason(now_et):
+    if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+        return None
+    if matched_target_window(now_et):
+        return None
+    return f"Scheduled run skipped: {now_et:%Y-%m-%d %H:%M %Z} is outside target New York alert windows."
+
+
+def report_window(now_et):
+    matched = matched_target_window(now_et)
+    if matched:
+        return matched
+    minutes = now_et.hour * 60 + now_et.minute
+    if 8 * 60 <= minutes <= 9 * 60 + 20:
+        return "数据发布窗口"
+    if 9 * 60 + 30 <= minutes <= 11 * 60 + 30:
+        return "美股开盘确认"
+    if 13 * 60 + 45 <= minutes <= 15 * 60 + 15:
+        return "Fed/FOMC/拍卖窗口"
+    if minutes >= 16 * 60 or minutes <= 7 * 60:
+        return "美股收盘总结"
+    return "盘中更新"
+
+
+def fetch_all_pairs():
+    pairs = {}
+    max_workers = min(10, len(SERIES) + len(MARKET_QUOTES))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_key = {}
+        for sid in SERIES:
+            future_to_key[executor.submit(fetch_latest_pair, sid)] = sid
+        for key in MARKET_QUOTES:
+            future_to_key[executor.submit(fetch_market_pair, key)] = key
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            try:
+                pairs[key] = future.result()
+            except Exception as exc:
+                FETCH_ERRORS[key] = str(exc)
+                pairs[key] = (None, None)
+    return pairs
+
+
 def next_event(now_et):
     for date_text, label in EVENTS:
         event_time = dt.datetime.fromisoformat(date_text)
@@ -216,7 +339,9 @@ def risk_and_conclusion(changes):
     usd = changes.get("DTWEXBGS_pct")
     gold = changes.get("GOLD_pct")
     btc = changes.get("BTC_pct")
-    spx = changes.get("SP500_pct")
+    spx = changes.get("SPY_pct")
+    if spx is None:
+        spx = changes.get("SP500_pct")
     hy = changes.get("BAMLH0A0HYM2_bp")
 
     long_pressure = (d30 is not None and d30 > 5) or (d10 is not None and d10 > 5)
@@ -242,7 +367,9 @@ def risk_and_conclusion(changes):
 def asset_implications(risk, changes):
     btc = changes.get("BTC_pct")
     gold = changes.get("GOLD_pct")
-    spx = changes.get("SP500_pct")
+    spx = changes.get("SPY_pct")
+    if spx is None:
+        spx = changes.get("SP500_pct")
     d30 = changes.get("DGS30_bp")
     usd = changes.get("DTWEXBGS_pct")
 
@@ -268,13 +395,13 @@ def asset_implications(risk, changes):
     return btc_line, gold_line, stock_line
 
 
-def build_message():
-    now_utc = dt.datetime.now(dt.timezone.utc)
+def build_message(now_utc=None):
+    if now_utc is None:
+        now_utc = dt.datetime.now(dt.timezone.utc)
     now_bj = now_utc.astimezone(ZoneInfo("Asia/Shanghai"))
     now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
 
-    pairs = {sid: fetch_latest_pair(sid) for sid in SERIES}
-    pairs.update({key: fetch_market_pair(key) for key in MARKET_QUOTES})
+    pairs = fetch_all_pairs()
     changes = {
         "DGS2_bp": change_bp(pairs["DGS2"]),
         "DGS10_bp": change_bp(pairs["DGS10"]),
@@ -294,22 +421,32 @@ def build_message():
         "RRPONTSYD_pct": change_pct(pairs["RRPONTSYD"]),
         "DPCREDIT_pct": change_pct(pairs["DPCREDIT"]),
     }
+    changes.update({f"{key}_pct": change_pct(pairs[key]) for key in MARKET_QUOTES})
 
     risk, conclusion = risk_and_conclusion(changes)
     btc_line, gold_line, stock_line = asset_implications(risk, changes)
+    sector_winners = ranked_keys(SECTOR_KEYS, changes, reverse=True)
+    sector_losers = ranked_keys(SECTOR_KEYS, changes, reverse=False)
+    stock_winners = ranked_keys(STOCK_KEYS, changes, reverse=True)
+    stock_losers = ranked_keys(STOCK_KEYS, changes, reverse=False)
+    index_line = "；".join(fmt_quote(key, pairs, changes) for key in INDEX_KEYS)
 
     lines = [
         "【Fed/美元信用监控】",
         f"时间：北京时间 {now_bj:%m-%d %H:%M} / 美东时间 {now_et:%m-%d %H:%M}",
+        f"窗口：{report_window(now_et)}",
         f"风险灯号：{risk}",
         f"结论：{conclusion}",
         "",
         "关键变化：",
         f"1. 利率：2Y {fmt_level(pairs['DGS2'])}% ({fmt_bp(changes['DGS2_bp'])})；10Y {fmt_level(pairs['DGS10'])}% ({fmt_bp(changes['DGS10_bp'])})；30Y {fmt_level(pairs['DGS30'])}% ({fmt_bp(changes['DGS30_bp'])})。",
         f"2. 实际利率/通胀预期：10Y real {fmt_level(pairs['DFII10'])}% ({fmt_bp(changes['DFII10_bp'])})；10Y breakeven {fmt_level(pairs['T10YIE'])}% ({fmt_bp(changes['T10YIE_bp'])})。",
-        f"3. 跨资产：Broad USD {fmt_pct(changes['DTWEXBGS_pct'])}；黄金 {fmt_level(pairs['GOLD'])} ({fmt_pct(changes['GOLD_pct'])})；BTC {fmt_level(pairs['BTC'], 0)} ({fmt_pct(changes['BTC_pct'])})；标普 {fmt_pct(changes['SP500_pct'])}；纳指 {fmt_pct(changes['NASDAQCOM_pct'])}。",
-        f"4. 信用/流动性：HY OAS {fmt_level(pairs['BAMLH0A0HYM2'])}% ({fmt_bp(changes['BAMLH0A0HYM2_bp'])})；SOFR {fmt_level(pairs['SOFR'])}%；EFFR {fmt_level(pairs['EFFR'])}%。",
-        f"5. Fed表：总资产 {fmt_pct(changes['WALCL_pct'])}；准备金 {fmt_pct(changes['RESBALNS_pct'])}；ON RRP {fmt_pct(changes['RRPONTSYD_pct'])}；贴现窗口 {fmt_pct(changes['DPCREDIT_pct'])}。",
+        f"3. 跨资产：Broad USD {fmt_pct(changes['DTWEXBGS_pct'])}；黄金 {fmt_level(pairs['GOLD'])} ({fmt_pct(changes['GOLD_pct'])})；BTC {fmt_level(pairs['BTC'], 0)} ({fmt_pct(changes['BTC_pct'])})。",
+        f"4. 美股指数：{index_line}。",
+        f"5. 美股板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
+        f"6. 重点个股：强 {fmt_movers(stock_winners, changes)}；弱 {fmt_movers(stock_losers, changes)}。",
+        f"7. 信用/流动性：HY OAS {fmt_level(pairs['BAMLH0A0HYM2'])}% ({fmt_bp(changes['BAMLH0A0HYM2_bp'])})；SOFR {fmt_level(pairs['SOFR'])}%；EFFR {fmt_level(pairs['EFFR'])}%。",
+        f"8. Fed表：总资产 {fmt_pct(changes['WALCL_pct'])}；准备金 {fmt_pct(changes['RESBALNS_pct'])}；ON RRP {fmt_pct(changes['RRPONTSYD_pct'])}；贴现窗口 {fmt_pct(changes['DPCREDIT_pct'])}。",
         "",
         "对资产：",
         btc_line,
@@ -325,8 +462,8 @@ def build_message():
         suffix = "等" if len(FETCH_ERRORS) > 5 else ""
         lines.append(f"数据提示：{missing}{suffix} 暂未更新或无法读取。")
     if MARKET_SOURCES:
-        sources = "；".join(f"{label_for_key(key)} {source}" for key, source in MARKET_SOURCES.items())
-        lines.append(f"行情源：{sources}。")
+        sources = "、".join(sorted(set(MARKET_SOURCES.values())))
+        lines.append(f"行情源：市场报价 {sources}；宏观/利率序列 FRED。")
     return "\n".join(lines)
 
 
@@ -351,7 +488,14 @@ def send_telegram(message):
 
 
 def main():
-    message = build_message()
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+    skip_reason = schedule_skip_reason(now_et)
+    if skip_reason:
+        print(skip_reason)
+        return
+
+    message = build_message(now_utc)
     print(message)
     send_telegram(message)
 

@@ -2,10 +2,12 @@ name: Macro Telegram Monitor
 
 on:
   schedule:
-    # GitHub Actions uses UTC.
-    # 12:40 UTC = 20:40 Beijing / 08:40 New York during US daylight time.
-    # 21:40 UTC = 05:40 Beijing / 17:40 New York during US daylight time.
-    - cron: "40 12,21 * * *"
+    # GitHub Actions uses UTC, while the target windows are anchored to New York time.
+    # The script sends only if the current New York time is inside a target window.
+    # US daylight time: 08:40, 10:40, 14:40, 20:40 New York.
+    - cron: "40 0,12,14,18 * * *"
+    # US standard time: 08:40, 10:40, 14:40, 20:40 New York.
+    - cron: "40 1,13,15,19 * * *"
   workflow_dispatch:
 
 jobs:
