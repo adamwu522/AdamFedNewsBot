@@ -1,0 +1,23 @@
+name: Macro Telegram Monitor
+
+on:
+  schedule:
+    # GitHub Actions uses UTC.
+    # 12:40 UTC = 20:40 Beijing / 08:40 New York during US daylight time.
+    # 21:40 UTC = 05:40 Beijing / 17:40 New York during US daylight time.
+    - cron: "40 12,21 * * *"
+  workflow_dispatch:
+
+jobs:
+  send-monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run monitor and send Telegram message
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 scripts/macro_monitor.py
