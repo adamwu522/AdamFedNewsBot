@@ -125,6 +125,7 @@ EXTENDED_WINDOW_GRACE_MINUTES = {
     (20, 40): 180,
 }
 BACKUP_TRIGGER_OFFSET_MINUTES = 30
+MISSED_WINDOW_LOOKBACK_MINUTES = 8 * 60
 HEALTH_CHECK_ET_WINDOW = (7, 10, "系统健康检查")
 HEALTH_CHECK_GRACE_MINUTES = 35
 
@@ -640,21 +641,43 @@ def target_window_grace_minutes(hour, minute):
     return EXTENDED_WINDOW_GRACE_MINUTES.get((hour, minute), SCHEDULE_GATE_GRACE_MINUTES)
 
 
+def market_window_classification(target_time, label, is_backup):
+    return {
+        "alert_type": "market",
+        "hour": target_time.hour,
+        "minute": target_time.minute,
+        "label": label,
+        "window_key": f"market-{target_time:%Y%m%d}-{target_time.hour:02d}{target_time.minute:02d}",
+        "is_backup": is_backup,
+        "should_send": True,
+    }
+
+
 def matched_target_window(now_et):
     minutes = now_et.hour * 60 + now_et.minute
     for hour, minute, label in TARGET_ET_WINDOWS:
         target = hour * 60 + minute
         if target <= minutes <= target + target_window_grace_minutes(hour, minute):
-            return {
-                "alert_type": "market",
-                "hour": hour,
-                "minute": minute,
-                "label": label,
-                "window_key": f"market-{now_et:%Y%m%d}-{hour:02d}{minute:02d}",
-                "is_backup": minutes >= target + BACKUP_TRIGGER_OFFSET_MINUTES,
-                "should_send": True,
-            }
+            target_time = dt.datetime.combine(now_et.date(), dt.time(hour, minute), tzinfo=now_et.tzinfo)
+            is_backup = minutes >= target + BACKUP_TRIGGER_OFFSET_MINUTES
+            return market_window_classification(target_time, label, is_backup)
     return None
+
+
+def latest_missed_target_window(now_et):
+    latest = None
+    for day_offset in (0, -1):
+        day = (now_et + dt.timedelta(days=day_offset)).date()
+        for hour, minute, label in TARGET_ET_WINDOWS:
+            target_time = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=now_et.tzinfo)
+            lag_minutes = (now_et - target_time).total_seconds() / 60
+            if 0 <= lag_minutes <= MISSED_WINDOW_LOOKBACK_MINUTES:
+                if latest is None or target_time > latest[0]:
+                    latest = (target_time, label)
+    if not latest:
+        return None
+    target_time, label = latest
+    return market_window_classification(target_time, f"{label}｜延迟补发", True)
 
 
 def matched_health_check(now_et):
@@ -683,7 +706,7 @@ def classify_run(now_et):
             "is_backup": False,
             "should_send": True,
         }
-    matched = matched_target_window(now_et) or matched_health_check(now_et)
+    matched = matched_target_window(now_et) or latest_missed_target_window(now_et) or matched_health_check(now_et)
     if matched:
         return matched
     return {

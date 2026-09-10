@@ -46,6 +46,8 @@ Beijing-time equivalents:
 
 Normal delivery should be within roughly 10-30 minutes of the listed window, depending on GitHub's queue. The workflow uses an Actions cache marker to skip duplicates if more than one watchdog run lands inside the same window.
 
+If GitHub wakes up late, the script can still send the latest missed market window for up to 8 hours and marks it as a delayed catch-up. Pushes to `main` that change the workflow or scripts also run one immediate market check, which makes deployment tests visible without waiting for the next scheduled wake-up.
+
 ## Reliability
 
 - Telegram sends are retried up to 5 times with short backoff.
@@ -55,6 +57,7 @@ Normal delivery should be within roughly 10-30 minutes of the listed window, dep
 - Missing data is summarized in one warning line instead of filling the report with `n/a`.
 - Manual `Run workflow` always sends a market message immediately.
 - Scheduled runs outside the New York target windows exit quietly.
+- Late scheduled runs can catch up the latest missed market window when it has not already been sent.
 - Watchdog triggers reduce the chance that a delayed or dropped scheduled run causes a missed alert, but GitHub Actions and mobile push notifications are still not a hard real-time delivery system.
 
 ## Important Limitation

@@ -1,6 +1,12 @@
 name: Macro Telegram Monitor
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/macro-monitor.yml"
+      - "scripts/**"
   schedule:
     # Watchdog schedule. GitHub Actions cron is UTC and can be delayed or dropped,
     # so the workflow wakes often and the script sends only inside New York target windows.
