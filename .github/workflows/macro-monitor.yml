@@ -2,17 +2,9 @@ name: Macro Telegram Monitor
 
 on:
   schedule:
-    # GitHub Actions uses UTC, while the target windows are anchored to New York time.
-    # The script sends only if the current New York time is inside a target window.
-    # US daylight time: 08:40, 10:40, 14:40, 20:40 New York.
-    - cron: "40 0,12,14,18 * * *"
-    # US standard time: 08:40, 10:40, 14:40, 20:40 New York.
-    - cron: "40 1,13,15,19 * * *"
-    # Backup triggers, 30 minutes after each target window.
-    - cron: "10 1,13,15,19 * * *"
-    - cron: "10 2,14,16,20 * * *"
-    # Daily health check at 07:10 New York.
-    - cron: "10 11,12 * * *"
+    # Watchdog schedule. GitHub Actions cron is UTC and can be delayed or dropped,
+    # so the workflow wakes often and the script sends only inside New York target windows.
+    - cron: "7,27,47 * * * *"
   workflow_dispatch:
 
 concurrency:

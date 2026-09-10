@@ -29,7 +29,7 @@ It also sends one daily health-check message to confirm that GitHub Actions and 
 
 ## Schedule
 
-The alert windows are anchored to New York time because US macro data, Fed communication, Treasury auctions, and cash equity trading follow that clock. GitHub Actions cron uses UTC, so the workflow includes both US daylight-time and standard-time UTC schedules. The script sends only when the current New York time is inside one of the target windows, which avoids duplicate alerts around daylight-saving changes.
+The alert windows are anchored to New York time because US macro data, Fed communication, Treasury auctions, and cash equity trading follow that clock. GitHub Actions cron uses UTC and can be delayed, so the workflow runs as a 20-minute watchdog. The script sends only when the current New York time is inside one of the target windows, which avoids daylight-saving-time drift and reduces the chance that one delayed scheduled run causes a missed alert.
 
 Target New York windows:
 
@@ -44,7 +44,7 @@ Beijing-time equivalents:
 - During US daylight time, market messages arrive around `20:40`, `22:40`, `02:40 next day`, and `08:40 next day`; the health check arrives around `19:10`.
 - During US standard time, market messages arrive around `21:40`, `23:40`, `03:40 next day`, and `09:40 next day`; the health check arrives around `20:10`.
 
-Each market window also has a backup trigger 30 minutes later. The workflow uses an Actions cache marker to skip the backup if the main alert already succeeded.
+Normal delivery should be within roughly 10-30 minutes of the listed window, depending on GitHub's queue. The workflow uses an Actions cache marker to skip duplicates if more than one watchdog run lands inside the same window.
 
 ## Reliability
 
@@ -55,7 +55,7 @@ Each market window also has a backup trigger 30 minutes later. The workflow uses
 - Missing data is summarized in one warning line instead of filling the report with `n/a`.
 - Manual `Run workflow` always sends a market message immediately.
 - Scheduled runs outside the New York target windows exit quietly.
-- Backup triggers reduce the chance that a delayed or dropped scheduled run causes a missed alert, but GitHub Actions and mobile push notifications are still not a hard real-time delivery system.
+- Watchdog triggers reduce the chance that a delayed or dropped scheduled run causes a missed alert, but GitHub Actions and mobile push notifications are still not a hard real-time delivery system.
 
 ## Important Limitation
 

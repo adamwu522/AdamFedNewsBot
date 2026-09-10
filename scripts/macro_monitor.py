@@ -119,7 +119,11 @@ TARGET_ET_WINDOWS = [
     (14, 40, "Fed/FOMC/拍卖窗口"),
     (20, 40, "美股收盘总结"),
 ]
-SCHEDULE_GATE_GRACE_MINUTES = 50
+SCHEDULE_GATE_GRACE_MINUTES = 90
+EXTENDED_WINDOW_GRACE_MINUTES = {
+    (14, 40): 180,
+    (20, 40): 180,
+}
 BACKUP_TRIGGER_OFFSET_MINUTES = 30
 HEALTH_CHECK_ET_WINDOW = (7, 10, "系统健康检查")
 HEALTH_CHECK_GRACE_MINUTES = 35
@@ -632,11 +636,15 @@ def fmt_ai_group_summary(changes):
     return f"强 {strong_text}；弱 {weak_text}"
 
 
+def target_window_grace_minutes(hour, minute):
+    return EXTENDED_WINDOW_GRACE_MINUTES.get((hour, minute), SCHEDULE_GATE_GRACE_MINUTES)
+
+
 def matched_target_window(now_et):
     minutes = now_et.hour * 60 + now_et.minute
     for hour, minute, label in TARGET_ET_WINDOWS:
         target = hour * 60 + minute
-        if target <= minutes <= target + SCHEDULE_GATE_GRACE_MINUTES:
+        if target <= minutes <= target + target_window_grace_minutes(hour, minute):
             return {
                 "alert_type": "market",
                 "hour": hour,
