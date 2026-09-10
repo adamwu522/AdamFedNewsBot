@@ -58,7 +58,28 @@ If GitHub wakes up late, the script can still send the latest missed market wind
 - Manual `Run workflow` always sends a market message immediately.
 - Scheduled runs outside the New York target windows exit quietly.
 - Late scheduled runs can catch up the latest missed market window when it has not already been sent.
+- For more reliable timing, use an external cron service to trigger the `macro-monitor-watchdog` repository dispatch event every 10-20 minutes. GitHub's own schedule can then remain as a backup.
 - Watchdog triggers reduce the chance that a delayed or dropped scheduled run causes a missed alert, but GitHub Actions and mobile push notifications are still not a hard real-time delivery system.
+
+## External Watchdog Trigger
+
+GitHub's built-in schedule is best-effort. For stronger timing, create a fine-grained GitHub token for this repository, then configure an external cron service to call:
+
+`POST https://api.github.com/repos/adamwu522/AdamFedNewsBot/dispatches`
+
+Headers:
+
+- `Accept: application/vnd.github+json`
+- `Authorization: Bearer YOUR_GITHUB_TOKEN`
+- `X-GitHub-Api-Version: 2022-11-28`
+
+Body:
+
+```json
+{"event_type":"macro-monitor-watchdog"}
+```
+
+The external cron can run every 10-20 minutes. The script still sends only inside target or catch-up windows, and the Actions cache marker skips duplicate alerts.
 
 ## Important Limitation
 

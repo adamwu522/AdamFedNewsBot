@@ -698,7 +698,8 @@ def matched_health_check(now_et):
 
 
 def classify_run(now_et):
-    if os.environ.get("GITHUB_EVENT_NAME") != "schedule":
+    event_name = os.environ.get("GITHUB_EVENT_NAME")
+    if event_name in {"workflow_dispatch", "push"}:
         return {
             "alert_type": "market",
             "label": report_window(now_et),

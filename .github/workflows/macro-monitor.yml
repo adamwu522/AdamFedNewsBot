@@ -1,6 +1,9 @@
 name: Macro Telegram Monitor
 
 on:
+  repository_dispatch:
+    types:
+      - macro-monitor-watchdog
   push:
     branches:
       - main
