@@ -11,6 +11,8 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from zoneinfo import ZoneInfo
 
+from btc_etf import build_etf_section
+
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 STOOQ_DAILY_URL = "https://stooq.com/q/d/l/"
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
@@ -113,21 +115,13 @@ AI_GROUPS = [
     ("电力/数据中心", ["VST", "CEG", "ETN", "GEV"]),
 ]
 AI_STOCK_KEYS = list(dict.fromkeys(key for _, keys in AI_GROUPS for key in keys))
-TARGET_ET_WINDOWS = [
-    (8, 40, "数据发布窗口"),
-    (10, 40, "美股开盘确认"),
-    (14, 40, "Fed/FOMC/拍卖窗口"),
-    (20, 40, "美股收盘总结"),
+REPORT_WINDOWS = [
+    ("morning", "Asia/Shanghai", 8, 40, "早报｜美股收盘复盘 / BTC ETF"),
+    ("evening", "America/New_York", 8, 40, "晚报｜美国数据发布 / 盘前观察"),
 ]
 SCHEDULE_GATE_GRACE_MINUTES = 90
-EXTENDED_WINDOW_GRACE_MINUTES = {
-    (14, 40): 180,
-    (20, 40): 180,
-}
 BACKUP_TRIGGER_OFFSET_MINUTES = 30
-MISSED_WINDOW_LOOKBACK_MINUTES = 8 * 60
-HEALTH_CHECK_ET_WINDOW = (7, 10, "系统健康检查")
-HEALTH_CHECK_GRACE_MINUTES = 35
+MISSED_WINDOW_LOOKBACK_MINUTES = 3 * 60
 
 EVENTS = [
     ("2026-09-09T08:30:00-04:00", "财政部长端美债回购加码开始"),
@@ -637,69 +631,53 @@ def fmt_ai_group_summary(changes):
     return f"强 {strong_text}；弱 {weak_text}"
 
 
-def target_window_grace_minutes(hour, minute):
-    return EXTENDED_WINDOW_GRACE_MINUTES.get((hour, minute), SCHEDULE_GATE_GRACE_MINUTES)
+def report_targets(now, day_offsets):
+    for kind, zone, hour, minute, label in REPORT_WINDOWS:
+        tz = ZoneInfo(zone)
+        for offset in day_offsets:
+            day = now.astimezone(tz).date() + dt.timedelta(days=offset)
+            target = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=tz)
+            yield target, kind, label
 
 
-def market_window_classification(target_time, label, is_backup):
+def market_window_classification(target_time, kind, label, is_backup):
     return {
         "alert_type": "market",
         "hour": target_time.hour,
         "minute": target_time.minute,
         "label": label,
-        "window_key": f"market-{target_time:%Y%m%d}-{target_time.hour:02d}{target_time.minute:02d}",
+        "window_key": f"digest-v2-{kind}-{target_time:%Y%m%d}",
         "is_backup": is_backup,
         "should_send": True,
     }
 
 
 def matched_target_window(now_et):
-    minutes = now_et.hour * 60 + now_et.minute
-    for hour, minute, label in TARGET_ET_WINDOWS:
-        target = hour * 60 + minute
-        if target <= minutes <= target + target_window_grace_minutes(hour, minute):
-            target_time = dt.datetime.combine(now_et.date(), dt.time(hour, minute), tzinfo=now_et.tzinfo)
-            is_backup = minutes >= target + BACKUP_TRIGGER_OFFSET_MINUTES
-            return market_window_classification(target_time, label, is_backup)
+    for target_time, kind, label in report_targets(now_et, (-1, 0)):
+        lag = (now_et.astimezone(dt.timezone.utc) - target_time.astimezone(dt.timezone.utc)).total_seconds() / 60
+        if 0 <= lag <= SCHEDULE_GATE_GRACE_MINUTES:
+            return market_window_classification(target_time, kind, label, lag >= BACKUP_TRIGGER_OFFSET_MINUTES)
     return None
 
 
 def latest_missed_target_window(now_et):
     latest = None
-    for day_offset in (0, -1):
-        day = (now_et + dt.timedelta(days=day_offset)).date()
-        for hour, minute, label in TARGET_ET_WINDOWS:
-            target_time = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=now_et.tzinfo)
-            lag_minutes = (now_et - target_time).total_seconds() / 60
-            if 0 <= lag_minutes <= MISSED_WINDOW_LOOKBACK_MINUTES:
-                if latest is None or target_time > latest[0]:
-                    latest = (target_time, label)
+    for target_time, kind, label in report_targets(now_et, (-1, 0)):
+        if target_time.astimezone(ZoneInfo("Asia/Shanghai")).date() != now_et.astimezone(ZoneInfo("Asia/Shanghai")).date():
+            continue
+        lag_minutes = (now_et.astimezone(dt.timezone.utc) - target_time.astimezone(dt.timezone.utc)).total_seconds() / 60
+        if 0 <= lag_minutes <= MISSED_WINDOW_LOOKBACK_MINUTES:
+            if latest is None or target_time > latest[0]:
+                latest = (target_time, kind, label)
     if not latest:
         return None
-    target_time, label = latest
-    return market_window_classification(target_time, f"{label}｜延迟补发", True)
-
-
-def matched_health_check(now_et):
-    hour, minute, label = HEALTH_CHECK_ET_WINDOW
-    minutes = now_et.hour * 60 + now_et.minute
-    target = hour * 60 + minute
-    if target <= minutes <= target + HEALTH_CHECK_GRACE_MINUTES:
-        return {
-            "alert_type": "health",
-            "hour": hour,
-            "minute": minute,
-            "label": label,
-            "window_key": f"health-{now_et:%Y%m%d}",
-            "is_backup": False,
-            "should_send": True,
-        }
-    return None
+    target_time, kind, label = latest
+    return market_window_classification(target_time, kind, f"{label}｜延迟补发", True)
 
 
 def classify_run(now_et):
     event_name = os.environ.get("GITHUB_EVENT_NAME")
-    if event_name in {"workflow_dispatch", "push"}:
+    if event_name == "workflow_dispatch":
         return {
             "alert_type": "market",
             "label": report_window(now_et),
@@ -707,7 +685,7 @@ def classify_run(now_et):
             "is_backup": False,
             "should_send": True,
         }
-    matched = matched_target_window(now_et) or latest_missed_target_window(now_et) or matched_health_check(now_et)
+    matched = matched_target_window(now_et) or latest_missed_target_window(now_et)
     if matched:
         return matched
     return {
@@ -716,7 +694,7 @@ def classify_run(now_et):
         "window_key": "",
         "is_backup": False,
         "should_send": False,
-        "skip_reason": f"Scheduled run skipped: {now_et:%Y-%m-%d %H:%M %Z} is outside target New York alert windows.",
+        "skip_reason": f"Run skipped: {now_et:%Y-%m-%d %H:%M %Z} is outside the morning/evening report windows.",
     }
 
 
@@ -754,15 +732,12 @@ def write_classification_outputs(classification):
 
 
 def next_target_window(now_et):
-    tz = now_et.tzinfo
-    for day_offset in range(3):
-        day = (now_et + dt.timedelta(days=day_offset)).date()
-        for hour, minute, label in TARGET_ET_WINDOWS:
-            candidate = dt.datetime.combine(day, dt.time(hour, minute), tzinfo=tz)
-            if candidate > now_et:
-                bj_time = candidate.astimezone(ZoneInfo("Asia/Shanghai"))
-                return f"{candidate:%m-%d %H:%M} ET / 北京时间 {bj_time:%m-%d %H:%M} {label}"
-    return "下一次美东固定观察窗口"
+    targets = sorted(report_targets(now_et, (0, 1, 2)))
+    for candidate, _, label in targets:
+        if candidate > now_et:
+            bj_time = candidate.astimezone(ZoneInfo("Asia/Shanghai"))
+            return f"北京时间 {bj_time:%m-%d %H:%M} {label}"
+    return "下一次早晚报窗口"
 
 
 def report_window(now_et):
@@ -777,7 +752,7 @@ def report_window(now_et):
     if 13 * 60 + 45 <= minutes <= 15 * 60 + 15:
         return "Fed/FOMC/拍卖窗口"
     if minutes >= 16 * 60 or minutes <= 7 * 60:
-        return "美股收盘总结"
+        return "美股收盘复盘 / BTC ETF"
     return "盘中更新"
 
 
@@ -829,7 +804,7 @@ def next_event(now_et):
         if event_time >= now_et:
             bj_time = event_time.astimezone(ZoneInfo("Asia/Shanghai"))
             return f"{event_time:%Y-%m-%d %H:%M} ET / 北京时间 {bj_time:%m-%d %H:%M} {label}"
-    return "9月 FOMC 后续市场反应与资产负债表数据"
+    return f"{next_target_window(now_et)}；经济事件日历待更新"
 
 
 def risk_and_conclusion(changes):
@@ -950,6 +925,8 @@ def build_message(now_utc=None, classification=None):
         fmt_credit_liquidity_line(pairs, changes),
         fmt_fed_balance_line(pairs, changes),
         "",
+        *build_etf_section(now_et, read_url_text),
+        "",
         "对资产：",
         btc_line,
         gold_line,
@@ -976,22 +953,6 @@ def build_message(now_utc=None, classification=None):
     if classification and classification.get("is_backup"):
         lines.append("触发说明：这是备用补发窗口；若主窗口已成功发送，本次会被自动跳过。")
     return "\n".join(lines)
-
-
-def build_health_check_message(now_utc=None):
-    if now_utc is None:
-        now_utc = dt.datetime.now(dt.timezone.utc)
-    now_bj = now_utc.astimezone(ZoneInfo("Asia/Shanghai"))
-    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
-    return "\n".join(
-        [
-            "【Fed/美元信用监控｜系统健康检查】",
-            f"时间：北京时间 {now_bj:%m-%d %H:%M} / 美东时间 {now_et:%m-%d %H:%M}",
-            "状态：GitHub Actions 已触发，Telegram 通道可达。",
-            f"下一观察窗口：{next_target_window(now_et)}。",
-            "说明：关键窗口有30分钟后的备用触发；已发送窗口会自动跳过。",
-        ]
-    )
 
 
 def send_telegram(message):
@@ -1040,12 +1001,10 @@ def main():
         print(classification.get("skip_reason", "Scheduled run skipped."))
         return
 
-    if classification.get("alert_type") == "health":
-        message = build_health_check_message(now_utc)
-    else:
-        message = build_message(now_utc, classification)
+    message = build_message(now_utc, classification)
     print(message)
-    send_telegram(message)
+    if "--dry-run" not in sys.argv:
+        send_telegram(message)
 
 
 if __name__ == "__main__":

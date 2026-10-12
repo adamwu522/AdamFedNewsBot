@@ -4,7 +4,7 @@ This is a GitHub Actions version of the Fed / dollar-credit monitor. It runs in 
 
 ## What It Sends
 
-Four times a day it sends a Telegram market message covering:
+Twice a day it sends a Telegram market message covering:
 
 - 2Y, 10Y, and 30Y Treasury yields.
 - 10Y real yield and 10Y breakeven inflation.
@@ -14,8 +14,9 @@ Four times a day it sends a Telegram market message covering:
 - High-yield credit spread and short-term funding rates.
 - Fed balance sheet proxies: total assets, reserve balances, ON RRP, and discount-window borrowing.
 - A green/yellow/orange/red risk light and short implications for BTC, gold, and US equities.
+- US spot BTC ETF daily net flows, change from the previous reported session, 5/20-session totals, flow streak, major funds, and the latest 5-session trend versus the preceding five.
 
-It also sends one daily health-check message to confirm that GitHub Actions and Telegram delivery are still working.
+There is no separate health-check message or overnight Fed/opening-bell alert. ETF data is refreshed in both digests, so the evening edition can include disclosures missing from the morning edition.
 
 ## Setup
 
@@ -29,24 +30,34 @@ It also sends one daily health-check message to confirm that GitHub Actions and 
 
 ## Schedule
 
-The alert windows are anchored to New York time because US macro data, Fed communication, Treasury auctions, and cash equity trading follow that clock. GitHub Actions cron uses UTC and can be delayed, so the workflow runs as a 20-minute watchdog. The script sends only when the current New York time is inside one of the target windows, which avoids daylight-saving-time drift and reduces the chance that one delayed scheduled run causes a missed alert.
+The morning recap is fixed to Beijing time; the evening data-release recap follows New York time. GitHub Actions cron uses UTC and can be delayed, so the workflow runs as a 20-minute watchdog. Frequent watchdog runs do not mean frequent Telegram messages: both native and external triggers use the same two daily send markers.
 
-Target New York windows:
+Target windows (every calendar day):
 
-- `08:40 ET`, about 10 minutes after 8:30 a.m. data releases.
-- `10:40 ET`, about 70 minutes after the US cash open.
-- `14:40 ET`, covering Fed/FOMC, Treasury auctions, and afternoon policy windows.
-- `20:40 ET`, a post-close wake-up recap after US data vendors have settled daily quotes.
-- `07:10 ET`, a short daily health check.
+- Morning: `08:40 Asia/Shanghai`, US close recap and BTC ETF flows. This stays at 08:40 all year.
+- Evening: `08:40 America/New_York`, about 10 minutes after 8:30 a.m. data releases, plus updated ETF disclosures.
 
 Beijing-time equivalents:
 
-- During US daylight time, market messages arrive around `20:40`, `22:40`, `02:40 next day`, and `08:40 next day`; the health check arrives around `19:10`.
-- During US standard time, market messages arrive around `21:40`, `23:40`, `03:40 next day`, and `09:40 next day`; the health check arrives around `20:10`.
+- During US daylight time: `08:40` and `20:40`.
+- During US standard time: `08:40` and `21:40`.
 
 Normal delivery should be within roughly 10-30 minutes of the listed window, depending on GitHub's queue. The workflow uses an Actions cache marker to skip duplicates if more than one watchdog run lands inside the same window.
 
-If GitHub wakes up late, the script can still send the latest missed market window for up to 8 hours and marks it as a delayed catch-up. Pushes to `main` that change the workflow or scripts also run one immediate market check, which makes deployment tests visible without waiting for the next scheduled wake-up.
+If GitHub wakes up late, the script can catch up for at most 3 hours, never beyond midnight in Beijing. Pushes run tests and obey the same delivery windows; deploying code no longer creates an extra immediate alert. Manual `Run workflow` remains an explicit immediate-send override. Reducing frequency means Fed announcements between these windows are covered by the next digest rather than an immediate notification.
+
+## BTC ETF Data
+
+The source is [Farside Investors' all-data table](https://farside.co.uk/bitcoin-etf-flow-all-data/), in USD millions. If direct access fails, a public Jina Reader rendering of the same page is tried. This is an alternate access route, not an independent second data provider. No additional API secret is required.
+
+- Reports label the US trading date, not the fetch date, and never turn an unreported dash into a zero flow.
+- Partial days show only a reported subtotal and do not enter trend calculations. Complete days require all active funds and a reconciled total (allowing the source's rounding).
+- Rolling totals use the latest 5/20 fully disclosed sessions, explicitly labeled as such. They stop at partially reported rows; streaks also stop at wholly unreported rows, so an undisclosed day cannot extend a claimed streak.
+- Weekends and empty holiday rows are not zero-flow trading days. If no new complete row is available, the last complete date is shown explicitly. Missing dates may reflect a holiday or delayed disclosure; the monitor does not infer a holiday from absent data.
+- History is cached separately from delivery markers. A source outage can display dated history with a clear cache warning; it does not interrupt the macro report or claim a fresh trend.
+- Flows describe ETF creations/redemptions, not AUM price changes or all institutional BTC demand.
+
+Run checks with `python3 -m unittest discover -s tests -v`. To preview a full report without sending Telegram, set `GITHUB_EVENT_NAME=workflow_dispatch` and run `python3 scripts/macro_monitor.py --dry-run`.
 
 ## Reliability
 
@@ -56,7 +67,7 @@ If GitHub wakes up late, the script can still send the latest missed market wind
 - SOFR and EFFR fall back to the New York Fed reference-rate API if FRED is unavailable.
 - Missing data is summarized in one warning line instead of filling the report with `n/a`.
 - Manual `Run workflow` always sends a market message immediately.
-- Scheduled runs outside the New York target windows exit quietly.
+- Scheduled runs outside the two target/catch-up windows exit quietly.
 - Late scheduled runs can catch up the latest missed market window when it has not already been sent.
 - For more reliable timing, use an external cron service to trigger the `macro-monitor-watchdog` repository dispatch event every 10-20 minutes. GitHub's own schedule can then remain as a backup.
 - Watchdog triggers reduce the chance that a delayed or dropped scheduled run causes a missed alert, but GitHub Actions and mobile push notifications are still not a hard real-time delivery system.

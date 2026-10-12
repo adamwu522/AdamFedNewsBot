@@ -10,9 +10,10 @@ on:
     paths:
       - ".github/workflows/macro-monitor.yml"
       - "scripts/**"
+      - "tests/**"
   schedule:
-    # Watchdog schedule. GitHub Actions cron is UTC and can be delayed or dropped,
-    # so the workflow wakes often and the script sends only inside New York target windows.
+    # Watchdog schedule. GitHub Actions cron is UTC and can be delayed or dropped.
+    # The script gates delivery to the Beijing morning / New York data windows.
     - cron: "7,27,47 * * * *"
   workflow_dispatch:
 
@@ -27,6 +28,10 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+
+      - name: Check scheduling and ETF calculations
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        run: python3 -m unittest discover -s tests -v
 
       - name: Classify alert window
         id: classify
@@ -45,7 +50,16 @@ jobs:
         if: steps.classify.outputs.should_send == 'true' && steps.classify.outputs.window_key != '' && steps.sent-marker.outputs.cache-hit == 'true'
         run: echo "Already sent ${{ steps.classify.outputs.window_key }}; skipping duplicate or backup trigger."
 
+      - name: Restore ETF history for data-source outages
+        if: steps.classify.outputs.should_send == 'true' && (steps.classify.outputs.window_key == '' || steps.sent-marker.outputs.cache-hit != 'true')
+        uses: actions/cache/restore@v6
+        with:
+          path: .monitor-data/btc-etf.json
+          key: macro-etf-data-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: macro-etf-data-
+
       - name: Run monitor and send Telegram message
+        id: send
         if: steps.classify.outputs.should_send == 'true' && (steps.classify.outputs.window_key == '' || steps.sent-marker.outputs.cache-hit != 'true')
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -69,3 +83,10 @@ jobs:
         with:
           path: .monitor-state/${{ steps.classify.outputs.window_key }}
           key: macro-sent-${{ steps.classify.outputs.window_key }}
+
+      - name: Save latest ETF history
+        if: steps.send.outcome == 'success' && hashFiles('.monitor-data/btc-etf.json') != ''
+        uses: actions/cache/save@v6
+        with:
+          path: .monitor-data/btc-etf.json
+          key: macro-etf-data-${{ github.run_id }}-${{ github.run_attempt }}
