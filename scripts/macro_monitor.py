@@ -923,7 +923,7 @@ def build_message(now_utc=None, classification=None):
 
     risk, conclusion = risk_and_conclusion(changes)
     btc_line, gold_line, stock_line = asset_implications(risk, changes)
-    ai_change, ai_count = ai_basket_change(pairs, changes)
+    ai_change, _ = ai_basket_change(pairs, changes)
     changes["AI_BASKET_pct"] = ai_change
     sector_winners = ranked_keys(SECTOR_KEYS + ["AI_BASKET"], changes, reverse=True)
     sector_losers = ranked_keys(SECTOR_KEYS + ["AI_BASKET"], changes, reverse=False)
@@ -939,8 +939,6 @@ def build_message(now_utc=None, classification=None):
         fmt_real_rate_line(pairs, changes),
         f"3. 美股指数：{index_line}。",
         f"4. 大类板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
-        (f"AI组合 {fmt_pct(ai_change)}" if ai_change is not None else "AI组合：成分行情未齐")
-        + f"（自定义本币等权，样本{ai_count}/{len(AI_BASKET_KEYS)}；美韩不同交易时段）。",
         "指数/板块涨跌相对前收盘；行情日期：" + "、".join(sorted({pairs[key][0][0] for key in INDEX_KEYS + SECTOR_KEYS + AI_BASKET_KEYS if has_latest(pairs.get(key))})),
         "",
         *build_etf_section(now_et, read_url_text),

@@ -19,13 +19,13 @@ The digest omits economic-release previews, AI subsectors, AI stock rankings, cr
 
 ### Custom AI Category
 
-AI is included in the broad-sector ranking and always shown as one aggregate line. It is a custom cross-market return basket, not an official index, ETF, or USD-denominated investment return. Each of the following 16 stocks has an equal weight of 1/16 in the arithmetic average of local-currency percentage changes from its previous close:
+AI participates in the broad-sector ranking; it has no separate explanation or standalone return line in the digest. It is a custom cross-market return basket, not an official index, ETF, or USD-denominated investment return. Each of the following 16 stocks has an equal weight of 1/16 in the arithmetic average of local-currency percentage changes from its previous close:
 
 - Chips and storage: NVDA, AMD, AVGO, TSM, MU, SNDK, 000660.KS (SK Hynix).
 - Model/cloud platforms: MSFT, GOOGL, META, AMZN, ORCL.
 - Applications/software: PLTR, CRM, ADBE, NOW.
 
-US and Korean sessions are not simultaneous; the report labels this and displays quote dates. All 16 returns must be available, and US dates must match the SPY benchmark date when available. Missing components are not silently reweighted: the AI return/rank is withheld and coverage is shown. No artificial index level is generated.
+US and Korean sessions are not simultaneous; quote dates remain visible in the report. All 16 returns must be available, and US dates must match the SPY benchmark date when available. Missing components are not silently reweighted: the AI return/rank is withheld. No artificial index level is generated.
 
 ## Setup
 

@@ -237,7 +237,8 @@ class ETFTests(unittest.TestCase):
             self.assertNotIn(omitted, report)
         self.assertIn("1. 美元：", report)
         self.assertIn("美元指数DXY", report)
-        self.assertIn("AI组合", report)
+        self.assertNotIn("自定义本币等权", report)
+        self.assertFalse(any(line.startswith("AI组合") for line in report.splitlines()))
         self.assertIn("大类板块", report)
         self.assertLessEqual(len(report), 4096)
 
