@@ -42,6 +42,11 @@ SERIES = {
 }
 
 MARKET_QUOTES = {
+    "DXY": {"label": "美元指数DXY", "yahoo": "DX-Y.NYB", "decimals": 2},
+    "PLTR": {"label": "PLTR", "yahoo": "PLTR", "decimals": 2},
+    "CRM": {"label": "CRM", "yahoo": "CRM", "decimals": 2},
+    "ADBE": {"label": "ADBE", "yahoo": "ADBE", "decimals": 2},
+    "NOW": {"label": "NOW", "yahoo": "NOW", "decimals": 2},
     "GOLD": {"label": "Gold", "stooq": "xauusd", "yahoo": "GC=F", "decimals": 2},
     "BTC": {"label": "BTC", "stooq": "btcusd", "yahoo": "BTC-USD", "decimals": 0},
     "SPY": {"label": "S&P 500", "yahoo": "SPY", "decimals": 2},
@@ -115,6 +120,11 @@ AI_GROUPS = [
     ("电力/数据中心", ["VST", "CEG", "ETN", "GEV"]),
 ]
 AI_STOCK_KEYS = list(dict.fromkeys(key for _, keys in AI_GROUPS for key in keys))
+AI_BASKET_KEYS = [
+    "NVDA", "AMD", "AVGO", "TSM", "MU", "SNDK", "000660.KS",
+    "MSFT", "GOOGL", "META", "AMZN", "ORCL",
+    "PLTR", "CRM", "ADBE", "NOW",
+]
 REPORT_WINDOWS = [
     ("morning", "Asia/Shanghai", 8, 40, "早报｜美股收盘复盘 / BTC ETF"),
     ("evening", "America/New_York", 10, 40, "晚报｜美股开盘后观察"),
@@ -331,6 +341,8 @@ def fetch_latest_pair(series_id):
 
 
 def label_for_key(key):
+    if key == "AI_BASKET":
+        return "AI组合"
     if key in SERIES:
         return SERIES[key]
     if key in MARKET_QUOTES:
@@ -399,6 +411,8 @@ def fetch_yahoo_pair(symbol):
 
 def stooq_fallback_symbol(yahoo_symbol):
     if not yahoo_symbol:
+        return None
+    if yahoo_symbol == "DX-Y.NYB":
         return None
     if yahoo_symbol.endswith(".KS") or "=" in yahoo_symbol or "-" in yahoo_symbol:
         return None
@@ -498,13 +512,28 @@ def any_latest(pairs, keys):
 
 def fmt_rates_line(pairs, changes):
     keys = [("2Y", "DGS2"), ("10Y", "DGS10"), ("30Y", "DGS30")]
-    if not any_latest(pairs, [key for _, key in keys]):
-        return "1. 利率：核心美债收益率暂未取到，先不据此判断长端压力。"
     items = [
         fmt_level_change(label, pairs[key], changes[f"{key}_bp"], suffix="%", change_formatter=fmt_bp)
         for label, key in keys
     ]
-    return f"1. 利率：{'；'.join(items)}。"
+    items.append(fmt_level_change("美元指数DXY", pairs.get("DXY"), changes.get("DXY_pct")))
+    return f"1. 美元：{'；'.join(items)}。"
+
+
+def ai_basket_change(pairs, changes):
+    benchmark_date = pairs["SPY"][0][0] if has_latest(pairs.get("SPY")) else None
+    eligible = []
+    for key in AI_BASKET_KEYS:
+        pair = pairs.get(key)
+        value = changes.get(f"{key}_pct")
+        if not has_latest(pair) or value is None:
+            continue
+        if key != "000660.KS" and benchmark_date and pair[0][0] != benchmark_date:
+            continue
+        eligible.append(value)
+    count = len(eligible)
+    # Fixed weights: do not silently redistribute a missing constituent's weight.
+    return (sum(eligible) / count if count == len(AI_BASKET_KEYS) else None), count
 
 
 def fmt_real_rate_line(pairs, changes):
@@ -894,24 +923,25 @@ def build_message(now_utc=None, classification=None):
 
     risk, conclusion = risk_and_conclusion(changes)
     btc_line, gold_line, stock_line = asset_implications(risk, changes)
-    sector_winners = ranked_keys(SECTOR_KEYS, changes, reverse=True)
-    sector_losers = ranked_keys(SECTOR_KEYS, changes, reverse=False)
+    ai_change, ai_count = ai_basket_change(pairs, changes)
+    changes["AI_BASKET_pct"] = ai_change
+    sector_winners = ranked_keys(SECTOR_KEYS + ["AI_BASKET"], changes, reverse=True)
+    sector_losers = ranked_keys(SECTOR_KEYS + ["AI_BASKET"], changes, reverse=False)
     index_line = fmt_quote_list(INDEX_KEYS, pairs, changes)
 
     lines = [
         "【Fed/美元信用监控】",
         f"时间：北京时间 {now_bj:%m-%d %H:%M} / 美东时间 {now_et:%m-%d %H:%M}",
         f"窗口：{window_label}",
-        f"风险灯号：{risk}",
-        f"结论：{conclusion}",
         "",
         "关键变化：",
         fmt_rates_line(pairs, changes),
         fmt_real_rate_line(pairs, changes),
-        fmt_cross_asset_line(pairs, changes),
-        f"4. 美股指数：{index_line}。",
-        f"5. 大类板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
-        "指数/板块涨跌相对前收盘；行情日期：" + "、".join(sorted({pairs[key][0][0] for key in INDEX_KEYS + SECTOR_KEYS if has_latest(pairs.get(key))})),
+        f"3. 美股指数：{index_line}。",
+        f"4. 大类板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
+        (f"AI组合 {fmt_pct(ai_change)}" if ai_change is not None else "AI组合：成分行情未齐")
+        + f"（自定义本币等权，样本{ai_count}/{len(AI_BASKET_KEYS)}；美韩不同交易时段）。",
+        "指数/板块涨跌相对前收盘；行情日期：" + "、".join(sorted({pairs[key][0][0] for key in INDEX_KEYS + SECTOR_KEYS + AI_BASKET_KEYS if has_latest(pairs.get(key))})),
         "",
         *build_etf_section(now_et, read_url_text),
         "",
@@ -920,7 +950,7 @@ def build_message(now_utc=None, classification=None):
         gold_line,
         stock_line,
     ]
-    displayed_keys = {"DGS2", "DGS10", "DGS30", "DFII10", "T10YIE", "DTWEXBGS", "GOLD", "BTC", *INDEX_KEYS, *SECTOR_KEYS}
+    displayed_keys = {"DGS2", "DGS10", "DGS30", "DFII10", "T10YIE", "DXY", *INDEX_KEYS, *SECTOR_KEYS, *AI_BASKET_KEYS}
     visible_errors = [key for key in visible_fetch_error_keys(pairs) if key in displayed_keys]
     if visible_errors:
         missing = "、".join(label_for_key(sid) for sid in visible_errors[:5])

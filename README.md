@@ -8,14 +8,24 @@ Twice a day it sends a Telegram market message covering:
 
 - 2Y, 10Y, and 30Y Treasury yields.
 - 10Y real yield and 10Y breakeven inflation.
-- Broad dollar, gold, BTC, S&P 500, and Nasdaq. Gold and BTC use public market-quote sources instead of FRED.
+- The dollar section combines Treasury yields with the ICE US Dollar Index (DXY, Yahoo symbol `DX-Y.NYB`). The Fed broad trade-weighted dollar series is not substituted for DXY.
 - Major US equity index ETFs and broad sector ETFs.
-- A green/yellow/orange/red risk light and short implications for BTC, gold, and US equities.
+- Short implications for BTC, gold, and US equities; no risk-light or conclusion header and no cross-asset quote section.
 - One line with aggregate US spot BTC ETF net inflow/outflow over the latest five fully disclosed sessions, including the date range and source. No fund breakdown or trend analysis.
 
 There is no separate health-check message or overnight Fed/opening-bell alert. ETF data is refreshed in both digests, so the evening edition can include disclosures missing from the morning edition.
 
 The digest omits economic-release previews, AI subsectors, AI stock rankings, credit/liquidity and Fed balance sheet sections. Some underlying series remain inputs to the existing risk rules. Index and sector changes are relative to the previous close; their quote dates are displayed to distinguish current-session data from older fallback quotes.
+
+### Custom AI Category
+
+AI is included in the broad-sector ranking and always shown as one aggregate line. It is a custom cross-market return basket, not an official index, ETF, or USD-denominated investment return. Each of the following 16 stocks has an equal weight of 1/16 in the arithmetic average of local-currency percentage changes from its previous close:
+
+- Chips and storage: NVDA, AMD, AVGO, TSM, MU, SNDK, 000660.KS (SK Hynix).
+- Model/cloud platforms: MSFT, GOOGL, META, AMZN, ORCL.
+- Applications/software: PLTR, CRM, ADBE, NOW.
+
+US and Korean sessions are not simultaneous; the report labels this and displays quote dates. All 16 returns must be available, and US dates must match the SPY benchmark date when available. Missing components are not silently reweighted: the AI return/rank is withheld and coverage is shown. No artificial index level is generated.
 
 ## Setup
 

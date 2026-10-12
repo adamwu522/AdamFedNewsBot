@@ -231,10 +231,42 @@ class ETFTests(unittest.TestCase):
         with patch.object(monitor, "fetch_all_pairs", return_value=pairs), patch.object(monitor, "build_etf_section", return_value=section):
             report = monitor.build_message(after_close(days[-1].date))
         self.assertIn("BTC现货ETF", report)
-        for omitted in ("AI细分", "AI个股", "信用/流动性", "Fed表", "下一观察点", "数据发布"):
+        for omitted in ("AI细分", "AI个股", "信用/流动性", "Fed表", "下一观察点", "数据发布", "风险灯号", "结论：", "跨资产"):
             self.assertNotIn(omitted, report)
+        self.assertIn("1. 美元：", report)
+        self.assertIn("美元指数DXY", report)
+        self.assertIn("AI组合", report)
         self.assertIn("大类板块", report)
         self.assertLessEqual(len(report), 4096)
+
+
+class BasketTests(unittest.TestCase):
+    def setUp(self):
+        self.pair = (("2026-10-12", 105), ("2026-10-09", 100))
+        self.pairs = {key: self.pair for key in monitor.AI_BASKET_KEYS + ["SPY"]}
+        self.changes = {f"{key}_pct": 1.0 for key in monitor.AI_BASKET_KEYS}
+
+    def test_fixed_equal_weights_and_sector_ranking(self):
+        self.changes["NVDA_pct"] = 17.0
+        value, count = monitor.ai_basket_change(self.pairs, self.changes)
+        self.assertEqual(count, 16)
+        self.assertEqual(value, 2.0)
+        changes = {"AI_BASKET_pct": value, "XLK_pct": 1.0}
+        self.assertEqual(monitor.ranked_keys(["XLK", "AI_BASKET"], changes, True)[0], "AI_BASKET")
+
+    def test_missing_or_stale_us_quote_does_not_reweight(self):
+        del self.changes["SNDK_pct"]
+        self.assertEqual(monitor.ai_basket_change(self.pairs, self.changes), (None, 15))
+        self.changes["SNDK_pct"] = 1.0
+        self.pairs["SNDK"] = (("2026-10-09", 105), ("2026-10-08", 100))
+        self.assertEqual(monitor.ai_basket_change(self.pairs, self.changes), (None, 15))
+
+    def test_dxy_missing_is_not_replaced_with_broad_dollar(self):
+        pairs = {key: self.pair for key in ["DGS2", "DGS10", "DGS30", "DTWEXBGS"]}
+        changes = {f"{key}_bp": 2.0 for key in ["DGS2", "DGS10", "DGS30"]}
+        line = monitor.fmt_rates_line(pairs, changes)
+        self.assertIn("美元指数DXY 未更新", line)
+        self.assertNotIn("Broad", line)
 
 
 if __name__ == "__main__":
