@@ -29,14 +29,14 @@ The digest omits economic-release previews, AI subsectors, AI stock rankings, cr
 
 ## Schedule
 
-Both digests are fixed to Beijing time. GitHub Actions cron uses UTC and can be delayed, so the workflow runs as a 20-minute watchdog. Frequent watchdog runs do not mean frequent Telegram messages: both native and external triggers use the same two daily send markers.
+The morning digest is fixed to Beijing time; the evening digest follows New York time. GitHub Actions cron uses UTC and can be delayed, so the workflow runs as a 20-minute watchdog. Frequent watchdog runs do not mean frequent Telegram messages: both native and external triggers use the same two daily send markers.
 
 Target windows (every calendar day):
 
 - Morning: `08:40 Asia/Shanghai`, US close recap and BTC ETF flows. This stays at 08:40 all year.
-- Evening: `22:40 Asia/Shanghai`, US market opening-session observation, plus updated ETF disclosures.
+- Evening: `10:40 America/New_York`, US market opening-session observation, plus updated ETF disclosures.
 
-The evening time is fixed by request: it corresponds to 10:40 ET (70 minutes after the regular open) during US daylight time and 09:40 ET (10 minutes after the regular open) during US standard time. It is not a fixed one-hour-after-open schedule.
+The evening digest is scheduled 70 minutes after the regular open: Beijing `22:40` during US daylight time and `23:40` during US standard time. Daylight-saving changes are applied automatically through the New York time zone. Morning delivery stays at Beijing `08:40` all year.
 
 Normal delivery should be within roughly 10-30 minutes of the listed window, depending on GitHub's queue. The workflow uses an Actions cache marker to skip duplicates if more than one watchdog run lands inside the same window.
 

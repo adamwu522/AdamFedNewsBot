@@ -117,7 +117,7 @@ AI_GROUPS = [
 AI_STOCK_KEYS = list(dict.fromkeys(key for _, keys in AI_GROUPS for key in keys))
 REPORT_WINDOWS = [
     ("morning", "Asia/Shanghai", 8, 40, "早报｜美股收盘复盘 / BTC ETF"),
-    ("evening", "Asia/Shanghai", 22, 40, "晚报｜美股开盘后观察"),
+    ("evening", "America/New_York", 10, 40, "晚报｜美股开盘后观察"),
 ]
 SCHEDULE_GATE_GRACE_MINUTES = 90
 BACKUP_TRIGGER_OFFSET_MINUTES = 30

@@ -53,11 +53,12 @@ class ScheduleTests(unittest.TestCase):
             self.assertIn("morning", result["window_key"])
             self.assertFalse(self.classify(date + "T08:39")["should_send"])
 
-    def test_evening_fixed_beijing_in_both_seasons(self):
-        for date in ("2026-07-15", "2026-12-15"):
-            self.assertIn("evening", self.classify(date + "T22:40")["window_key"])
-            self.assertFalse(self.classify(date + "T22:39")["should_send"])
+    def test_evening_follows_new_york_in_both_seasons(self):
+        for date, hour in (("2026-07-15", 22), ("2026-12-15", 23)):
+            self.assertIn("evening", self.classify(f"{date}T{hour}:40")["window_key"])
+            self.assertFalse(self.classify(f"{date}T{hour}:39")["should_send"])
             self.assertFalse(self.classify(date + "T00:05")["should_send"])
+        self.assertFalse(self.classify("2026-12-15T22:40")["should_send"])
 
     def test_dst_transition_dates_have_two_windows_only(self):
         for date in ("2026-03-08", "2026-11-01", "2026-11-02"):
