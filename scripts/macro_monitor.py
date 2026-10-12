@@ -117,7 +117,7 @@ AI_GROUPS = [
 AI_STOCK_KEYS = list(dict.fromkeys(key for _, keys in AI_GROUPS for key in keys))
 REPORT_WINDOWS = [
     ("morning", "Asia/Shanghai", 8, 40, "早报｜美股收盘复盘 / BTC ETF"),
-    ("evening", "America/New_York", 8, 40, "晚报｜美国数据发布 / 盘前观察"),
+    ("evening", "Asia/Shanghai", 22, 40, "晚报｜美股开盘后观察"),
 ]
 SCHEDULE_GATE_GRACE_MINUTES = 90
 BACKUP_TRIGGER_OFFSET_MINUTES = 30
@@ -654,6 +654,8 @@ def market_window_classification(target_time, kind, label, is_backup):
 
 def matched_target_window(now_et):
     for target_time, kind, label in report_targets(now_et, (-1, 0)):
+        if target_time.astimezone(ZoneInfo("Asia/Shanghai")).date() != now_et.astimezone(ZoneInfo("Asia/Shanghai")).date():
+            continue
         lag = (now_et.astimezone(dt.timezone.utc) - target_time.astimezone(dt.timezone.utc)).total_seconds() / 60
         if 0 <= lag <= SCHEDULE_GATE_GRACE_MINUTES:
             return market_window_classification(target_time, kind, label, lag >= BACKUP_TRIGGER_OFFSET_MINUTES)
@@ -680,7 +682,7 @@ def classify_run(now_et):
     if event_name == "workflow_dispatch":
         return {
             "alert_type": "market",
-            "label": report_window(now_et),
+            "label": "手动市场简报",
             "window_key": "",
             "is_backup": False,
             "should_send": True,
@@ -744,16 +746,7 @@ def report_window(now_et):
     matched = matched_target_window(now_et)
     if matched:
         return matched["label"]
-    minutes = now_et.hour * 60 + now_et.minute
-    if 8 * 60 <= minutes <= 9 * 60 + 20:
-        return "数据发布窗口"
-    if 9 * 60 + 30 <= minutes <= 11 * 60 + 30:
-        return "美股开盘确认"
-    if 13 * 60 + 45 <= minutes <= 15 * 60 + 15:
-        return "Fed/FOMC/拍卖窗口"
-    if minutes >= 16 * 60 or minutes <= 7 * 60:
-        return "美股收盘复盘 / BTC ETF"
-    return "盘中更新"
+    return "市场简报"
 
 
 def derive_t10y_breakeven(pairs):
@@ -903,8 +896,6 @@ def build_message(now_utc=None, classification=None):
     btc_line, gold_line, stock_line = asset_implications(risk, changes)
     sector_winners = ranked_keys(SECTOR_KEYS, changes, reverse=True)
     sector_losers = ranked_keys(SECTOR_KEYS, changes, reverse=False)
-    ai_stock_winners = ranked_keys(AI_STOCK_KEYS, changes, reverse=True)
-    ai_stock_losers = ranked_keys(AI_STOCK_KEYS, changes, reverse=False)
     index_line = fmt_quote_list(INDEX_KEYS, pairs, changes)
 
     lines = [
@@ -919,11 +910,8 @@ def build_message(now_utc=None, classification=None):
         fmt_real_rate_line(pairs, changes),
         fmt_cross_asset_line(pairs, changes),
         f"4. 美股指数：{index_line}。",
-        f"5. AI细分：{fmt_ai_group_summary(changes)}。",
-        f"6. AI个股：强 {fmt_movers(ai_stock_winners, changes)}；弱 {fmt_movers(ai_stock_losers, changes)}。",
-        f"7. 大类板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
-        fmt_credit_liquidity_line(pairs, changes),
-        fmt_fed_balance_line(pairs, changes),
+        f"5. 大类板块：强 {fmt_movers(sector_winners, changes)}；弱 {fmt_movers(sector_losers, changes)}。",
+        "指数/板块涨跌相对前收盘；行情日期：" + "、".join(sorted({pairs[key][0][0] for key in INDEX_KEYS + SECTOR_KEYS if has_latest(pairs.get(key))})),
         "",
         *build_etf_section(now_et, read_url_text),
         "",
@@ -931,12 +919,9 @@ def build_message(now_utc=None, classification=None):
         btc_line,
         gold_line,
         stock_line,
-        "",
-        f"下一观察点：{next_event(now_et)}。",
-        "",
-        "注：这是云端规则版快报，侧重公开数据和阈值判断；Fed讲话/新闻语义仍建议用人工或LLM复核。",
     ]
-    visible_errors = visible_fetch_error_keys(pairs)
+    displayed_keys = {"DGS2", "DGS10", "DGS30", "DFII10", "T10YIE", "DTWEXBGS", "GOLD", "BTC", *INDEX_KEYS, *SECTOR_KEYS}
+    visible_errors = [key for key in visible_fetch_error_keys(pairs) if key in displayed_keys]
     if visible_errors:
         missing = "、".join(label_for_key(sid) for sid in visible_errors[:5])
         suffix = "等" if len(visible_errors) > 5 else ""

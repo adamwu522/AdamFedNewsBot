@@ -176,87 +176,37 @@ def closed_weekday(now_et):
 
 
 def format_flows(days, now_et, source, cached=False):
-    lines = ["BTC现货ETF（美国，净申赎资金）："]
     closed_day = closed_weekday(now_et)
-    visible = [day for day in days if day.date <= closed_day and day.date.weekday() < 5]
-    reported = [day for day in visible if any(value is not None for value in day.flows.values())]
+    reported = [day for day in days if day.date <= closed_day and day.date.weekday() < 5
+                and any(value is not None for value in day.flows.values())]
     complete = [day for day in reported if day.complete]
+    notes = []
     if cached:
-        lines.append("实时抓取失败，以下为历史缓存；本次不确认趋势更新。")
+        notes.append("历史缓存")
     if not complete:
-        lines.append("暂未取得完整日数据，资金趋势暂不判断。")
-    if reported and (not complete or reported[-1].date > complete[-1].date):
-        partial = reported[-1]
-        subtotal = sum(value for value in partial.flows.values() if value is not None)
-        count = sum(value is not None for value in partial.flows.values())
-        lines.append(f"{partial.date:%m-%d} 尚未报齐或合计待核对：已报{count}只，小计 {fmt_flow(subtotal)}；不计入趋势。")
-    if complete:
-        latest = complete[-1]
-        lines.append(f"最新完整日 {latest.date:%Y-%m-%d}：合计 {fmt_flow(latest.total)}。")
-        if latest.date < closed_day:
-            lines.append(f"截至本次抓取，{closed_day:%m-%d} 无完整记录（休市或待更新）；沿用上述统计日。")
-        if (closed_day - latest.date).days > 4:
-            lines.append("数据日期偏旧，以下仅为历史统计。")
-
-        # Stop at an incomplete trading row instead of stitching a rolling window across it.
-        history = []
-        for day in reversed(reported):
-            if day.date > latest.date:
-                continue
-            if not day.complete:
-                break
-            history.append(day)
-        history.reverse()
-        if len(history) >= 2:
-            delta = latest.total - history[-2].total
-            lines.append(f"较前一统计日净流量变化 {fmt_flow(delta)}（金额差）。")
-
-        totals = {}
-        for length in (5, 20):
-            if len(history) >= length:
-                totals[length] = sum(day.total for day in history[-length:])
-        rolling = [f"近{length}个完整披露日 {fmt_flow(total)}" for length, total in totals.items()]
-        if rolling:
-            lines.append("；".join(rolling) + "。")
-        if len(history) < 20:
-            lines.append(f"连续完整样本仅{len(history)}个交易日，不足的周期不作统计。")
-        if latest.total:
-            positive = latest.total > 0
-            streak = 0
-            streak_rows = [day for day in visible if day.date <= latest.date]
-            for day in reversed(streak_rows):
-                if not day.complete or day.total == 0 or (day.total > 0) != positive:
-                    break
-                streak += 1
-            lines.append(f"截至统计日，至少连续{streak}个交易日净{'流入' if positive else '流出'}（遇缺报不跨日推断）。")
-        else:
-            lines.append("当日净流量为零，连续流入/流出中断。")
-
-        tickers = [ticker for ticker in ("IBIT", "FBTC", "GBTC", "BTC") if latest.flows.get(ticker) is not None]
-        others = sorted(
-            (ticker for ticker, value in latest.flows.items() if value is not None and ticker not in tickers),
-            key=lambda ticker: abs(latest.flows[ticker]), reverse=True,
-        )
-        tickers.extend(ticker for ticker in others[:2] if latest.flows[ticker] != 0)
-        lines.append("基金：" + "；".join(f"{ticker} {fmt_flow(latest.flows[ticker])}" for ticker in tickers) + "。")
-        if len(history) >= 10:
-            previous = sum(day.total for day in history[-10:-5])
-            current = totals[5]
-            if current > 0 and previous <= 0:
-                trend = "近5日由净流出/持平转为净流入"
-            elif current < 0 and previous >= 0:
-                trend = "近5日由净流入/持平转为净流出"
-            elif current > previous:
-                trend = "近5日净流入扩大" if current > 0 else "近5日净流出收窄"
-            elif current < previous:
-                trend = "近5日净流出扩大" if current < 0 else "近5日净流入收窄"
-            else:
-                trend = "近5日净流量持平"
-            lines.append(f"趋势（截至{latest.date:%m-%d}，按完整披露日）：{trend}，较前5日 {fmt_flow(current - previous)}。")
-        lines.append("ETF流向仅反映该渠道资金，不等于全部机构需求，也不单独预测BTC涨跌。")
-    lines.append(f"来源：{source} {FARSIDE_URL}")
-    return lines
-
+        return ["BTC现货ETF：近5日数据暂不可用（未报齐）。"]
+    latest = complete[-1]
+    history = []
+    for day in reversed(reported):
+        if day.date > latest.date:
+            continue
+        if not day.complete:
+            break
+        history.append(day)
+        if len(history) == 5:
+            break
+    if len(history) < 5:
+        return [f"BTC现货ETF：近5日数据未报齐，暂不汇总（完整样本{len(history)}日）。"]
+    total = sum(day.total for day in history)
+    direction = "净流入" if total > 0 else "净流出" if total < 0 else "净流量"
+    amount = fmt_flow(abs(total)).lstrip("+")
+    if reported[-1].date > latest.date:
+        notes.append("最新日未报齐")
+    if (closed_day - latest.date).days > 4:
+        notes.append("日期偏旧")
+    suffix = f"；{'、'.join(notes)}" if notes else ""
+    return [f"BTC现货ETF：近5个完整披露日合计{direction} {amount}"
+            f"（{history[-1].date:%Y-%m-%d}至{latest.date:%m-%d}；{source}{suffix}）。"]
 
 def build_etf_section(now_et, read_text, cache_path=CACHE_PATH):
     try:
@@ -264,4 +214,4 @@ def build_etf_section(now_et, read_text, cache_path=CACHE_PATH):
         return format_flows(days, now_et, source, cached)
     except Exception as exc:
         print(f"ETF section unavailable: {type(exc).__name__}", file=sys.stderr)
-        return ["BTC现货ETF：数据暂不可用，本次不判断资金趋势；其他监控继续。"]
+        return ["BTC现货ETF：近5日数据暂不可用。"]

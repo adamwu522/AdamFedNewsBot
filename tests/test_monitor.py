@@ -53,10 +53,11 @@ class ScheduleTests(unittest.TestCase):
             self.assertIn("morning", result["window_key"])
             self.assertFalse(self.classify(date + "T08:39")["should_send"])
 
-    def test_evening_follows_new_york_dst(self):
-        self.assertIn("evening", self.classify("2026-07-15T20:40")["window_key"])
-        self.assertIn("evening", self.classify("2026-12-15T21:40")["window_key"])
-        self.assertFalse(self.classify("2026-12-15T20:40")["should_send"])
+    def test_evening_fixed_beijing_in_both_seasons(self):
+        for date in ("2026-07-15", "2026-12-15"):
+            self.assertIn("evening", self.classify(date + "T22:40")["window_key"])
+            self.assertFalse(self.classify(date + "T22:39")["should_send"])
+            self.assertFalse(self.classify(date + "T00:05")["should_send"])
 
     def test_dst_transition_dates_have_two_windows_only(self):
         for date in ("2026-03-08", "2026-11-01", "2026-11-02"):
@@ -71,9 +72,10 @@ class ScheduleTests(unittest.TestCase):
     def test_no_overnight_opening_or_health_alert(self):
         for when in ("2026-10-12T02:40", "2026-10-12T19:10", "2026-10-12T12:30"):
             self.assertFalse(self.classify(when)["should_send"])
-        primary = self.classify("2026-10-12T20:40")
-        old_opening = self.classify("2026-10-12T22:40")
-        self.assertEqual(primary["window_key"], old_opening["window_key"])
+        self.assertFalse(self.classify("2026-10-12T20:40")["should_send"])
+        primary = self.classify("2026-10-12T22:40")
+        backup = self.classify("2026-10-12T23:40")
+        self.assertEqual(primary["window_key"], backup["window_key"])
 
     def test_catchup_boundary_and_duplicate_key(self):
         primary = self.classify("2026-10-12T08:40")
@@ -111,15 +113,15 @@ class ETFTests(unittest.TestCase):
         self.assertIsNone(days[-1].flows["FBTC"])
         self.assertFalse(days[-1].complete)
         rendered = "\n".join(etf.format_flows(days, after_close(dt.date(2026, 10, 9)), "test"))
-        self.assertIn("尚未报齐", rendered)
-        self.assertIn("最新完整日 2026-10-08", rendered)
+        self.assertIn("未报齐", rendered)
+        self.assertNotIn("合计", rendered)
 
     def test_all_pending_zero_total_is_not_final(self):
         days = etf.parse_flows(table([["09 Oct 2026", "-", "-", "-", "-", "0.0"]]))
         self.assertFalse(days[0].complete)
         rendered = "\n".join(etf.format_flows(days, after_close(days[0].date), "test"))
         self.assertNotIn("合计", rendered)
-        self.assertIn("暂不判断", rendered)
+        self.assertIn("暂不可用", rendered)
 
     def test_zero_is_real_and_prelaunch_missing_is_not_pending(self):
         days = etf.parse_flows(table([["08 Oct 2026", "0", "0", "0", "-", "0"], ["09 Oct 2026", "1", "0", "0", "2", "3"]]))
@@ -138,27 +140,28 @@ class ETFTests(unittest.TestCase):
                 etf.flow_number(raw)
         self.assertEqual(etf.flow_number("(1,234.5)"), -1234.5)
 
-    def test_totals_streak_and_week_on_week_reversal(self):
+    def test_only_five_day_total_without_analysis_or_funds(self):
         days = history([-10] * 15 + [20] * 5)
         rendered = "\n".join(etf.format_flows(days, after_close(days[-1].date), "test"))
-        self.assertIn("近5个完整披露日 +1.00亿美元", rendered)
-        self.assertIn("近20个完整披露日 -5,000万美元", rendered)
-        self.assertIn("连续5个交易日净流入", rendered)
-        self.assertIn("转为净流入", rendered)
-        self.assertIn("较前5日 +1.50亿美元", rendered)
+        self.assertIn("近5个完整披露日合计净流入 1.00亿美元", rendered)
+        self.assertEqual(len(rendered.splitlines()), 1)
+        for omitted in ("20个", "趋势", "连续", "IBIT", "FBTC", "较前"):
+            self.assertNotIn(omitted, rendered)
+        outflows = history([-20] * 5)
+        self.assertIn("净流出 1.00亿美元", "".join(etf.format_flows(outflows, after_close(outflows[-1].date), "test")))
 
     def test_partial_row_breaks_rolling_history(self):
         days = history([10] * 20)
         days[-3].complete = False
         rendered = "\n".join(etf.format_flows(days, after_close(days[-1].date), "test"))
         self.assertNotIn("近5个完整披露日", rendered)
-        self.assertIn("仅2个交易日", rendered)
+        self.assertIn("完整样本2日", rendered)
 
-    def test_unreported_day_does_not_extend_streak(self):
+    def test_unreported_day_not_counted_as_zero(self):
         days = history([10] * 6)
         days[-2] = etf.FlowDay(days[-2].date, {"IBIT": None}, 0, False)
         rendered = "\n".join(etf.format_flows(days, after_close(days[-1].date), "test"))
-        self.assertIn("至少连续1个交易日", rendered)
+        self.assertIn("净流入 5,000万美元", rendered)
 
     def test_weekend_and_not_yet_closed_data(self):
         days = history([10] * 5)
@@ -167,7 +170,7 @@ class ETFTests(unittest.TestCase):
         self.assertEqual(etf.closed_weekday(saturday), friday)
         before_close = after_close(friday).replace(hour=15)
         rendered = "\n".join(etf.format_flows(days, before_close, "test"))
-        self.assertNotIn(f"最新完整日 {friday}", rendered)
+        self.assertIn("未报齐", rendered)
 
     def test_stale_history_is_explicit(self):
         days = history([10] * 5)
@@ -203,7 +206,7 @@ class ETFTests(unittest.TestCase):
             def offline(*args, **kwargs):
                 raise OSError("offline")
             result = etf.build_etf_section(after_close(dt.date(2026, 10, 9)), offline, Path(directory) / "absent.json")
-            self.assertIn("暂不判断", "\n".join(result))
+            self.assertIn("暂不可用", "\n".join(result))
 
     def test_older_live_snapshot_cannot_overwrite_newer_cache(self):
         now = after_close(dt.date(2026, 10, 9))
@@ -227,7 +230,9 @@ class ETFTests(unittest.TestCase):
         with patch.object(monitor, "fetch_all_pairs", return_value=pairs), patch.object(monitor, "build_etf_section", return_value=section):
             report = monitor.build_message(after_close(days[-1].date))
         self.assertIn("BTC现货ETF", report)
-        self.assertIn("AI细分", report)
+        for omitted in ("AI细分", "AI个股", "信用/流动性", "Fed表", "下一观察点", "数据发布"):
+            self.assertNotIn(omitted, report)
+        self.assertIn("大类板块", report)
         self.assertLessEqual(len(report), 4096)
 
 

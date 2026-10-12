@@ -10,13 +10,12 @@ Twice a day it sends a Telegram market message covering:
 - 10Y real yield and 10Y breakeven inflation.
 - Broad dollar, gold, BTC, S&P 500, and Nasdaq. Gold and BTC use public market-quote sources instead of FRED.
 - Major US equity index ETFs and broad sector ETFs.
-- AI-linked stocks grouped by chips/GPUs, HBM/NAND storage, semiconductor equipment/EDA, networking/optical, servers/cooling, cloud platforms, and data-center power.
-- High-yield credit spread and short-term funding rates.
-- Fed balance sheet proxies: total assets, reserve balances, ON RRP, and discount-window borrowing.
 - A green/yellow/orange/red risk light and short implications for BTC, gold, and US equities.
-- US spot BTC ETF daily net flows, change from the previous reported session, 5/20-session totals, flow streak, major funds, and the latest 5-session trend versus the preceding five.
+- One line with aggregate US spot BTC ETF net inflow/outflow over the latest five fully disclosed sessions, including the date range and source. No fund breakdown or trend analysis.
 
 There is no separate health-check message or overnight Fed/opening-bell alert. ETF data is refreshed in both digests, so the evening edition can include disclosures missing from the morning edition.
+
+The digest omits economic-release previews, AI subsectors, AI stock rankings, credit/liquidity and Fed balance sheet sections. Some underlying series remain inputs to the existing risk rules. Index and sector changes are relative to the previous close; their quote dates are displayed to distinguish current-session data from older fallback quotes.
 
 ## Setup
 
@@ -30,17 +29,14 @@ There is no separate health-check message or overnight Fed/opening-bell alert. E
 
 ## Schedule
 
-The morning recap is fixed to Beijing time; the evening data-release recap follows New York time. GitHub Actions cron uses UTC and can be delayed, so the workflow runs as a 20-minute watchdog. Frequent watchdog runs do not mean frequent Telegram messages: both native and external triggers use the same two daily send markers.
+Both digests are fixed to Beijing time. GitHub Actions cron uses UTC and can be delayed, so the workflow runs as a 20-minute watchdog. Frequent watchdog runs do not mean frequent Telegram messages: both native and external triggers use the same two daily send markers.
 
 Target windows (every calendar day):
 
 - Morning: `08:40 Asia/Shanghai`, US close recap and BTC ETF flows. This stays at 08:40 all year.
-- Evening: `08:40 America/New_York`, about 10 minutes after 8:30 a.m. data releases, plus updated ETF disclosures.
+- Evening: `22:40 Asia/Shanghai`, US market opening-session observation, plus updated ETF disclosures.
 
-Beijing-time equivalents:
-
-- During US daylight time: `08:40` and `20:40`.
-- During US standard time: `08:40` and `21:40`.
+The evening time is fixed by request: it corresponds to 10:40 ET (70 minutes after the regular open) during US daylight time and 09:40 ET (10 minutes after the regular open) during US standard time. It is not a fixed one-hour-after-open schedule.
 
 Normal delivery should be within roughly 10-30 minutes of the listed window, depending on GitHub's queue. The workflow uses an Actions cache marker to skip duplicates if more than one watchdog run lands inside the same window.
 
@@ -51,8 +47,8 @@ If GitHub wakes up late, the script can catch up for at most 3 hours, never beyo
 The source is [Farside Investors' all-data table](https://farside.co.uk/bitcoin-etf-flow-all-data/), in USD millions. If direct access fails, a public Jina Reader rendering of the same page is tried. This is an alternate access route, not an independent second data provider. No additional API secret is required.
 
 - Reports label the US trading date, not the fetch date, and never turn an unreported dash into a zero flow.
-- Partial days show only a reported subtotal and do not enter trend calculations. Complete days require all active funds and a reconciled total (allowing the source's rounding).
-- Rolling totals use the latest 5/20 fully disclosed sessions, explicitly labeled as such. They stop at partially reported rows; streaks also stop at wholly unreported rows, so an undisclosed day cannot extend a claimed streak.
+- Partial days do not enter the five-session total. Complete days require all active funds and a reconciled total (allowing the source's rounding).
+- The total uses five fully disclosed sessions, explicitly labeled with its date range. It stops at partially reported historical rows; fewer than five complete sessions produces an unavailable notice rather than a misleading total.
 - Weekends and empty holiday rows are not zero-flow trading days. If no new complete row is available, the last complete date is shown explicitly. Missing dates may reflect a holiday or delayed disclosure; the monitor does not infer a holiday from absent data.
 - History is cached separately from delivery markers. A source outage can display dated history with a clear cache warning; it does not interrupt the macro report or claim a fresh trend.
 - Flows describe ETF creations/redemptions, not AUM price changes or all institutional BTC demand.
