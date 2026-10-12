@@ -179,34 +179,27 @@ def format_flows(days, now_et, source, cached=False):
     closed_day = closed_weekday(now_et)
     reported = [day for day in days if day.date <= closed_day and day.date.weekday() < 5
                 and any(value is not None for value in day.flows.values())]
-    complete = [day for day in reported if day.complete]
+    recent = reported[-5:]
+    if not recent:
+        return ["BTC现货ETF：近5日数据暂不可用（未报齐）。"]
+    lines = [f"BTC现货ETF（近5个交易日，每日净额；{source}）："]
+    for day in recent:
+        if not day.complete:
+            lines.append(f"{day.date:%Y-%m-%d}：未报齐，暂不展示净额。")
+            continue
+        direction = "净流入" if day.total > 0 else "净流出" if day.total < 0 else "净流量"
+        amount = fmt_flow(abs(day.total)).lstrip("+")
+        lines.append(f"{day.date:%Y-%m-%d}：{direction} {amount}")
     notes = []
     if cached:
         notes.append("历史缓存")
-    if not complete:
-        return ["BTC现货ETF：近5日数据暂不可用（未报齐）。"]
-    latest = complete[-1]
-    history = []
-    for day in reversed(reported):
-        if day.date > latest.date:
-            continue
-        if not day.complete:
-            break
-        history.append(day)
-        if len(history) == 5:
-            break
-    if len(history) < 5:
-        return [f"BTC现货ETF：近5日数据未报齐，暂不汇总（完整样本{len(history)}日）。"]
-    total = sum(day.total for day in history)
-    direction = "净流入" if total > 0 else "净流出" if total < 0 else "净流量"
-    amount = fmt_flow(abs(total)).lstrip("+")
-    if reported[-1].date > latest.date:
-        notes.append("最新日未报齐")
-    if (closed_day - latest.date).days > 4:
+    if len(recent) < 5:
+        notes.append(f"未报齐5日，仅取得{len(recent)}日记录")
+    if (closed_day - recent[-1].date).days > 4:
         notes.append("日期偏旧")
-    suffix = f"；{'、'.join(notes)}" if notes else ""
-    return [f"BTC现货ETF：近5个完整披露日合计{direction} {amount}"
-            f"（{history[-1].date:%Y-%m-%d}至{latest.date:%m-%d}；{source}{suffix}）。"]
+    if notes:
+        lines.append("数据提示：" + "；".join(notes) + "。")
+    return lines
 
 def build_etf_section(now_et, read_text, cache_path=CACHE_PATH):
     try:

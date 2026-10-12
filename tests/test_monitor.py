@@ -141,28 +141,30 @@ class ETFTests(unittest.TestCase):
                 etf.flow_number(raw)
         self.assertEqual(etf.flow_number("(1,234.5)"), -1234.5)
 
-    def test_only_five_day_total_without_analysis_or_funds(self):
-        days = history([-10] * 15 + [20] * 5)
+    def test_five_daily_values_without_sum_analysis_or_funds(self):
+        days = history([-10] * 15 + [20, -30, 0, 40, -50])
         rendered = "\n".join(etf.format_flows(days, after_close(days[-1].date), "test"))
-        self.assertIn("近5个完整披露日合计净流入 1.00亿美元", rendered)
-        self.assertEqual(len(rendered.splitlines()), 1)
-        for omitted in ("20个", "趋势", "连续", "IBIT", "FBTC", "较前"):
+        self.assertEqual(len(rendered.splitlines()), 6)
+        expected = ["净流入 2,000万美元", "净流出 3,000万美元", "净流量 0万美元", "净流入 4,000万美元", "净流出 5,000万美元"]
+        for line, day, value in zip(rendered.splitlines()[1:], days[-5:], expected):
+            self.assertEqual(line, f"{day.date}：{value}")
+        for omitted in ("合计", "汇总", "趋势", "连续", "IBIT", "FBTC", "较前"):
             self.assertNotIn(omitted, rendered)
-        outflows = history([-20] * 5)
-        self.assertIn("净流出 1.00亿美元", "".join(etf.format_flows(outflows, after_close(outflows[-1].date), "test")))
 
-    def test_partial_row_breaks_rolling_history(self):
+    def test_partial_day_is_marked_without_hiding_other_days(self):
         days = history([10] * 20)
         days[-3].complete = False
         rendered = "\n".join(etf.format_flows(days, after_close(days[-1].date), "test"))
-        self.assertNotIn("近5个完整披露日", rendered)
-        self.assertIn("完整样本2日", rendered)
+        self.assertIn(f"{days[-3].date}：未报齐", rendered)
+        self.assertEqual(rendered.count("净流入 1,000万美元"), 4)
+        self.assertEqual(len(rendered.splitlines()), 6)
 
     def test_unreported_day_not_counted_as_zero(self):
         days = history([10] * 6)
         days[-2] = etf.FlowDay(days[-2].date, {"IBIT": None}, 0, False)
         rendered = "\n".join(etf.format_flows(days, after_close(days[-1].date), "test"))
-        self.assertIn("净流入 5,000万美元", rendered)
+        self.assertEqual(rendered.count("净流入 1,000万美元"), 5)
+        self.assertNotIn("净流量 0", rendered)
 
     def test_weekend_and_not_yet_closed_data(self):
         days = history([10] * 5)

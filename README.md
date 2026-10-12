@@ -11,7 +11,7 @@ Twice a day it sends a Telegram market message covering:
 - The dollar section combines Treasury yields with the ICE US Dollar Index (DXY, Yahoo symbol `DX-Y.NYB`). The Fed broad trade-weighted dollar series is not substituted for DXY.
 - Major US equity index ETFs and broad sector ETFs.
 - Short implications for BTC, gold, and US equities; no risk-light or conclusion header and no cross-asset quote section.
-- One line with aggregate US spot BTC ETF net inflow/outflow over the latest five fully disclosed sessions, including the date range and source. No fund breakdown or trend analysis.
+- Five dated lines showing US spot BTC ETF daily net inflow/outflow across all funds, oldest to newest. No five-day sum, fund breakdown or trend analysis.
 
 There is no separate health-check message or overnight Fed/opening-bell alert. ETF data is refreshed in both digests, so the evening edition can include disclosures missing from the morning edition.
 
@@ -57,8 +57,8 @@ If GitHub wakes up late, the script can catch up for at most 3 hours, never beyo
 The source is [Farside Investors' all-data table](https://farside.co.uk/bitcoin-etf-flow-all-data/), in USD millions. If direct access fails, a public Jina Reader rendering of the same page is tried. This is an alternate access route, not an independent second data provider. No additional API secret is required.
 
 - Reports label the US trading date, not the fetch date, and never turn an unreported dash into a zero flow.
-- Partial days do not enter the five-session total. Complete days require all active funds and a reconciled total (allowing the source's rounding).
-- The total uses five fully disclosed sessions, explicitly labeled with its date range. It stops at partially reported historical rows; fewer than five complete sessions produces an unavailable notice rather than a misleading total.
+- Each daily net amount requires all active funds and a reconciled daily total (allowing the source's rounding).
+- The latest five reported sessions each get their own dated row. Partially reported days are labeled pending without showing a provisional amount; other days remain visible. Fewer than five records is explicitly labeled, never padded with invented zeros.
 - Weekends and empty holiday rows are not zero-flow trading days. If no new complete row is available, the last complete date is shown explicitly. Missing dates may reflect a holiday or delayed disclosure; the monitor does not infer a holiday from absent data.
 - History is cached separately from delivery markers. A source outage can display dated history with a clear cache warning; it does not interrupt the macro report or claim a fresh trend.
 - Flows describe ETF creations/redemptions, not AUM price changes or all institutional BTC demand.
